@@ -67,9 +67,6 @@
 #define APP_SHORT_NAME "vkcube"
 #define APP_LONG_NAME "Vulkan Cube"
 
-#include "vk_khr_descriptor_heap.h"
-
-
 // Allow a maximum of two outstanding presentation operations.
 #define FRAME_LAG 2
 
@@ -304,15 +301,7 @@ typedef struct {
     VkFramebuffer framebuffer;
     VkDescriptorSet descriptor_set;
     VkBuffer descriptor_heap[3];
-    VkDeviceMemory descHeapMemory[3];
 } SwapchainImageResources;
-
-enum {
-    bufferHeap,
-    samplerHeap,
-    imageHeap,
-    heapCount,
-};
 
 struct demo {
 #if defined(VK_USE_PLATFORM_WIN32_KHR)
@@ -392,9 +381,6 @@ struct demo {
     VkPhysicalDeviceProperties gpu_props;
     VkQueueFamilyProperties *queue_props;
     VkPhysicalDeviceMemoryProperties memory_properties;
-
-    VkPhysicalDeviceDescriptorHeapFeaturesKHR descriptorHeapFeature;
-    VkPhysicalDeviceDescriptorHeapPropertiesKHR descriptorHeapProperties;
 
     uint32_t enabled_extension_count;
     uint32_t enabled_layer_count;
@@ -827,88 +813,8 @@ static void demo_draw_build_cmd(struct demo *demo, VkCommandBuffer cmd_buf) {
     demo_push_cb_label(demo, cmd_buf, renderpass_color, "InsideRenderPass");
 
     vkCmdBindPipeline(cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS, demo->pipeline);
-    // vkCmdBindDescriptorSets(cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS, demo->pipeline_layout, 0, 1,
-    //                         &demo->swapchain_image_resources[demo->current_buffer].descriptor_set, 0, NULL);
-
-    PFN_vkCmdBindSamplerHeapKHR vkCmdBindSamplerHeapKHR =
-        (PFN_vkCmdBindSamplerHeapKHR) vkGetDeviceProcAddr(demo->device, "vkCmdBindSamplerHeapKHR");
-
-    PFN_vkCmdBindImageHeapKHR vkCmdBindImageHeapKHR =
-        (PFN_vkCmdBindImageHeapKHR) vkGetDeviceProcAddr(demo->device, "vkCmdBindImageHeapKHR");
-
-    PFN_vkCmdBindBufferHeapKHR vkCmdBindBufferHeapKHR =
-        (PFN_vkCmdBindBufferHeapKHR) vkGetDeviceProcAddr(demo->device, "vkCmdBindBufferHeapKHR");
-
-    for (unsigned int ii = 0; ii < heapCount; ii++)
-    {
-        if (ii == bufferHeap)
-        {
-            VkBufferDeviceAddressInfo addressInfo = {
-                .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
-                .pNext = NULL,
-                .buffer = demo->swapchain_image_resources[demo->current_buffer].descriptor_heap[ii],
-            };
-
-            VkDeviceAddressRangeKHR heapRange = {
-                .address = vkGetBufferDeviceAddressKHR(demo->device, &addressInfo),
-                .size = demo->descriptorHeapProperties.bufferHeapAlignment,
-            };
-
-            VkBindHeapInfoKHR pBindInfo = {
-                .sType = VK_STRUCTURE_TYPE_BIND_HEAP_INFO_KHR,
-                .pNext = NULL,
-                .heapRange = heapRange,
-                .reservedRangeOffset = ii * demo->descriptorHeapProperties.bufferHeapDescriptorAlignment,
-            };
-
-            vkCmdBindBufferHeapKHR(cmd_buf, &pBindInfo);
-        }
-        else if (ii == imageHeap)
-        {
-            VkBufferDeviceAddressInfo addressInfo = {
-                .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
-                .pNext = NULL,
-                .buffer = demo->swapchain_image_resources[demo->current_buffer].descriptor_heap[ii],
-            };
-
-            VkDeviceAddressRangeKHR heapRange = {
-                .address = vkGetBufferDeviceAddressKHR(demo->device, &addressInfo),
-                .size = demo->descriptorHeapProperties.samplerHeapAlignment,
-            };
-
-            VkBindHeapInfoKHR pBindInfo = {
-                .sType = VK_STRUCTURE_TYPE_BIND_HEAP_INFO_KHR,
-                .pNext = NULL,
-                .heapRange = heapRange,
-                .reservedRangeOffset = ii * demo->descriptorHeapProperties.imageHeapDescriptorAlignment,
-            };
-
-            vkCmdBindImageHeapKHR(cmd_buf, &pBindInfo);
-        }
-        else if (ii == samplerHeap)
-        {
-            VkBufferDeviceAddressInfo addressInfo = {
-                .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
-                .pNext = NULL,
-                .buffer = demo->swapchain_image_resources[demo->current_buffer].descriptor_heap[ii],
-            };
-
-            VkDeviceAddressRangeKHR heapRange = {
-                .address = vkGetBufferDeviceAddressKHR(demo->device, &addressInfo),
-                .size = demo->descriptorHeapProperties.samplerHeapAlignment,
-            };
-
-            VkBindHeapInfoKHR pBindInfo = {
-                .sType = VK_STRUCTURE_TYPE_BIND_HEAP_INFO_KHR,
-                .pNext = NULL,
-                .heapRange = heapRange,
-                .reservedRangeOffset = ii * demo->descriptorHeapProperties.samplerHeapDescriptorAlignment,
-            };
-
-            vkCmdBindSamplerHeapKHR(cmd_buf, &pBindInfo);
-        }
-    }
-
+    vkCmdBindDescriptorSets(cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS, demo->pipeline_layout, 0, 1,
+                            &demo->swapchain_image_resources[demo->current_buffer].descriptor_set, 0, NULL);
     VkViewport viewport;
     memset(&viewport, 0, sizeof(viewport));
     float viewport_dimension;
@@ -1977,54 +1883,54 @@ void demo_prepare_cube_data_buffers(struct demo *demo) {
     }
 }
 
-// static void demo_prepare_descriptor_layout(struct demo *demo) {
-//     const VkDescriptorSetLayoutBinding layout_bindings[3] = {
-//         [0] =
-//             {
-//                 .binding = 0,
-//                 .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-//                 .descriptorCount = 1,
-//                 .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
-//                 .pImmutableSamplers = NULL,
-//             },
-//         [1] =
-//             {
-//                 .binding = 1,
-//                 .descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER,
-//                 .descriptorCount = 1,
-//                 .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
-//                 .pImmutableSamplers = NULL,
-//             },
-//         [2] =
-//             {
-//                 .binding = 2,
-//                 .descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
-//                 .descriptorCount = 1,
-//                 .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
-//                 .pImmutableSamplers = NULL,
-//             },
-//     };
-//     const VkDescriptorSetLayoutCreateInfo descriptor_layout = {
-//         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-//         .pNext = NULL,
-//         .bindingCount = 3,
-//         .pBindings = layout_bindings,
-//     };
-//     VkResult U_ASSERT_ONLY err;
+static void demo_prepare_descriptor_layout(struct demo *demo) {
+    const VkDescriptorSetLayoutBinding layout_bindings[3] = {
+        [0] =
+            {
+                .binding = 0,
+                .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                .descriptorCount = 1,
+                .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
+                .pImmutableSamplers = NULL,
+            },
+        [1] =
+            {
+                .binding = 1,
+                .descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER,
+                .descriptorCount = 1,
+                .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+                .pImmutableSamplers = NULL,
+            },
+        [2] =
+            {
+                .binding = 2,
+                .descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+                .descriptorCount = 1,
+                .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+                .pImmutableSamplers = NULL,
+            },
+    };
+    const VkDescriptorSetLayoutCreateInfo descriptor_layout = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+        .pNext = NULL,
+        .bindingCount = 3,
+        .pBindings = layout_bindings,
+    };
+    VkResult U_ASSERT_ONLY err;
 
-//     err = vkCreateDescriptorSetLayout(demo->device, &descriptor_layout, NULL, &demo->desc_layout);
-//     assert(!err);
+    err = vkCreateDescriptorSetLayout(demo->device, &descriptor_layout, NULL, &demo->desc_layout);
+    assert(!err);
 
-//     const VkPipelineLayoutCreateInfo pPipelineLayoutCreateInfo = {
-//         .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-//         .pNext = NULL,
-//         .setLayoutCount = 1,
-//         .pSetLayouts = &demo->desc_layout,
-//     };
+    const VkPipelineLayoutCreateInfo pPipelineLayoutCreateInfo = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        .pNext = NULL,
+        .setLayoutCount = 1,
+        .pSetLayouts = &demo->desc_layout,
+    };
 
-//     err = vkCreatePipelineLayout(demo->device, &pPipelineLayoutCreateInfo, NULL, &demo->pipeline_layout);
-//     assert(!err);
-// }
+    err = vkCreatePipelineLayout(demo->device, &pPipelineLayoutCreateInfo, NULL, &demo->pipeline_layout);
+    assert(!err);
+}
 
 static void demo_prepare_render_pass(struct demo *demo) {
     // The initial layout for the color and depth attachments will be LAYOUT_UNDEFINED
@@ -2179,7 +2085,7 @@ static void demo_prepare_pipeline(struct demo *demo) {
 
     memset(&pipeline, 0, sizeof(pipeline));
     pipeline.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-    // pipeline.layout = demo->pipeline_layout;
+    pipeline.layout = demo->pipeline_layout;
 
     memset(&vi, 0, sizeof(vi));
     vi.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
@@ -2234,12 +2140,6 @@ static void demo_prepare_pipeline(struct demo *demo) {
     demo_prepare_vs(demo);
     demo_prepare_fs(demo);
 
-    memset(&pipelineCache, 0, sizeof(pipelineCache));
-    pipelineCache.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
-
-    err = vkCreatePipelineCache(demo->device, &pipelineCache, NULL, &demo->pipelineCache);
-    assert(!err);
-
     // Two stages: vs and fs
     VkPipelineShaderStageCreateInfo shaderStages[2];
     memset(&shaderStages, 0, 2 * sizeof(VkPipelineShaderStageCreateInfo));
@@ -2254,18 +2154,11 @@ static void demo_prepare_pipeline(struct demo *demo) {
     shaderStages[1].module = demo->frag_shader_module;
     shaderStages[1].pName = "main";
 
-    VkDescriptorHeapStridesKHR strideInfo = {
-        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_HEAP_STRIDES_KHR,
-        .bufferHeapStride = 16,
-        .imageHeapStride  = 32,
-        .samplerHeapStride = 16,
-        .pNext = NULL,
-    };
+    memset(&pipelineCache, 0, sizeof(pipelineCache));
+    pipelineCache.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
 
-    VkPipelineCreateFlags2CreateInfoKHR pipe2CreateInfo = {};
-    pipe2CreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_CREATE_FLAGS_2_CREATE_INFO_KHR;
-    pipe2CreateInfo.pNext = &strideInfo;
-    pipe2CreateInfo.flags = VK_PIPELINE_CREATE_2_DESCRIPTOR_HEAP_BIT_KHR;
+    err = vkCreatePipelineCache(demo->device, &pipelineCache, NULL, &demo->pipelineCache);
+    assert(!err);
 
     pipeline.pVertexInputState = &vi;
     pipeline.pInputAssemblyState = &ia;
@@ -2278,8 +2171,6 @@ static void demo_prepare_pipeline(struct demo *demo) {
     pipeline.pStages = shaderStages;
     pipeline.renderPass = demo->render_pass;
     pipeline.pDynamicState = &dynamicState;
-    pipeline.layout = NULL;
-    pipeline.pNext = &pipe2CreateInfo;
 
     err = vkCreateGraphicsPipelines(demo->device, demo->pipelineCache, 1, &pipeline, NULL, &demo->pipeline);
     assert(!err);
@@ -2288,268 +2179,89 @@ static void demo_prepare_pipeline(struct demo *demo) {
     vkDestroyShaderModule(demo->device, demo->vert_shader_module, NULL);
 }
 
-// static void demo_prepare_descriptor_pool(struct demo *demo) {
-//     const VkDescriptorPoolSize type_counts[3] = {
-//         [0] =
-//             {
-//                 .type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-//                 .descriptorCount = demo->swapchainImageCount,
-//             },
-//         [1] =
-//             {
-//                 .type = VK_DESCRIPTOR_TYPE_SAMPLER,
-//                 .descriptorCount = demo->swapchainImageCount * DEMO_TEXTURE_COUNT,
-//             },
-//         [2] =
-//             {
-//                 .type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
-//                 .descriptorCount = demo->swapchainImageCount * DEMO_TEXTURE_COUNT,
-//             },
-//     };
-//     const VkDescriptorPoolCreateInfo descriptor_pool = {
-//         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-//         .pNext = NULL,
-//         .maxSets = demo->swapchainImageCount,
-//         .poolSizeCount = 3,
-//         .pPoolSizes = type_counts,
-//     };
-//     VkResult U_ASSERT_ONLY err;
-
-//     err = vkCreateDescriptorPool(demo->device, &descriptor_pool, NULL, &demo->desc_pool);
-//     assert(!err);
-// }
-
-// static void demo_prepare_descriptor_set(struct demo *demo) {
-//     VkDescriptorImageInfo tex_descs[DEMO_TEXTURE_COUNT];
-//     VkWriteDescriptorSet writes[3];
-//     VkResult U_ASSERT_ONLY err;
-
-//     VkDescriptorSetAllocateInfo alloc_info = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-//                                               .pNext = NULL,
-//                                               .descriptorPool = demo->desc_pool,
-//                                               .descriptorSetCount = 1,
-//                                               .pSetLayouts = &demo->desc_layout};
-
-//     VkDescriptorBufferInfo buffer_info;
-//     buffer_info.offset = 0;
-//     buffer_info.range = sizeof(struct vktexcube_vs_uniform);
-
-//     memset(&tex_descs, 0, sizeof(tex_descs));
-//     for (unsigned int i = 0; i < DEMO_TEXTURE_COUNT; i++) {
-//         tex_descs[i].sampler = demo->textures[i].sampler;
-//         tex_descs[i].imageView = demo->textures[i].view;
-//         tex_descs[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-//     }
-
-//     memset(&writes, 0, sizeof(writes));
-
-//     writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-//     writes[0].descriptorCount = 1;
-//     writes[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-//     writes[0].pBufferInfo = &buffer_info;
-
-//     writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-//     writes[1].dstBinding = 1;
-//     writes[1].descriptorCount = 1;
-//     writes[1].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
-//     writes[1].dstArrayElement = 0;
-//     writes[1].pImageInfo = tex_descs;
-
-//     writes[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-//     writes[2].dstBinding = 2;
-//     writes[2].descriptorCount = 1;
-//     writes[2].dstArrayElement = 0;
-//     writes[2].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-//     writes[2].pImageInfo = tex_descs;
-
-//     for (unsigned int i = 0; i < demo->swapchainImageCount; i++) {
-//         err = vkAllocateDescriptorSets(demo->device, &alloc_info, &demo->swapchain_image_resources[i].descriptor_set);
-//         assert(!err);
-//         buffer_info.buffer = demo->swapchain_image_resources[i].uniform_buffer;
-//         writes[0].dstSet = demo->swapchain_image_resources[i].descriptor_set;
-//         writes[1].dstSet = demo->swapchain_image_resources[i].descriptor_set;
-//         writes[2].dstSet = demo->swapchain_image_resources[i].descriptor_set;
-//         vkUpdateDescriptorSets(demo->device, 3, writes, 0, NULL);
-//     }
-// }
-
-static void demo_prepare_descriptor_heap(struct demo *demo)
-{
-    VkResult err = VK_SUCCESS;
-    VkBufferCreateInfo heapInfo;
-    VkMemoryRequirements memReqs;
-    VkMemoryAllocateInfo memAllocInfo;
-
-    PFN_vkWriteBufferDescriptorsKHR vkWriteBufferDescriptorsKHR =
-        (PFN_vkWriteBufferDescriptorsKHR) vkGetDeviceProcAddr(demo->device, "vkWriteBufferDescriptorsKHR");
-
-    PFN_vkWriteSamplerDescriptorsKHR vkWriteSamplerDescriptorsKHR =
-        (PFN_vkWriteSamplerDescriptorsKHR) vkGetDeviceProcAddr(demo->device, "vkWriteSamplerDescriptorsKHR");
-
-    PFN_vkWriteImageDescriptorsKHR vkWriteImageDescriptorsKHR =
-        (PFN_vkWriteImageDescriptorsKHR) vkGetDeviceProcAddr(demo->device, "vkWriteImageDescriptorsKHR");
-
-    // create memory
-    for (unsigned int i = 0; i < demo->swapchainImageCount; i++) 
-    {
-        for (unsigned int ii = 0; ii < heapCount; ii++)
-        {
-            memset(&heapInfo, 0, sizeof(heapInfo));
-            memset(&memReqs, 0, sizeof(memReqs));
-            memset(&memAllocInfo, 0, sizeof(memAllocInfo));
-
-            heapInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-            heapInfo.flags = VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_DESCRIPTOR_HEAP_BIT_KHR | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
-            heapInfo.size  = 0;
-            if (ii == bufferHeap)
+static void demo_prepare_descriptor_pool(struct demo *demo) {
+    const VkDescriptorPoolSize type_counts[3] = {
+        [0] =
             {
-                heapInfo.size  = demo->descriptorHeapProperties.bufferHeapAlignment;
-            }
-            else if (ii == imageHeap)
+                .type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                .descriptorCount = demo->swapchainImageCount,
+            },
+        [1] =
             {
-                heapInfo.size  = demo->descriptorHeapProperties.imageHeapAlignment;
-            }
-            else if (ii == samplerHeap)
+                .type = VK_DESCRIPTOR_TYPE_SAMPLER,
+                .descriptorCount = demo->swapchainImageCount * DEMO_TEXTURE_COUNT,
+            },
+        [2] =
             {
-                heapInfo.size  = demo->descriptorHeapProperties.samplerHeapAlignment;
-            }
+                .type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+                .descriptorCount = demo->swapchainImageCount * DEMO_TEXTURE_COUNT,
+            },
+    };
+    const VkDescriptorPoolCreateInfo descriptor_pool = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+        .pNext = NULL,
+        .maxSets = demo->swapchainImageCount,
+        .poolSizeCount = 3,
+        .pPoolSizes = type_counts,
+    };
+    VkResult U_ASSERT_ONLY err;
 
-            err = vkCreateBuffer(demo->device, &heapInfo, NULL, &demo->swapchain_image_resources[i].descriptor_heap[ii]);
-            vkGetBufferMemoryRequirements(demo->device, demo->swapchain_image_resources[i].descriptor_heap[ii], &memReqs);
-            memAllocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-            memAllocInfo.pNext = NULL;
-            memAllocInfo.allocationSize = memReqs.size;
-
-            memory_type_from_properties(demo, memReqs.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT,
-                                &memAllocInfo.memoryTypeIndex);
-
-            err = vkAllocateMemory(demo->device, &memAllocInfo, NULL, &demo->swapchain_image_resources[i].descHeapMemory[ii]);
-            err = vkBindBufferMemory(demo->device, 
-                                    demo->swapchain_image_resources[i].descriptor_heap[ii],
-                                    demo->swapchain_image_resources[i].descHeapMemory[ii],
-                                    0);
-
-            void* pData = NULL;
-            vkMapMemory(demo->device, 
-                        demo->swapchain_image_resources[i].descHeapMemory[ii],
-                        0,
-                        VK_WHOLE_SIZE,
-                        0,
-                        &pData);
-
-            // write srd
-
-            if (ii == bufferHeap)
-            {
-                //heap buffer host ponter
-                const VkHostAddressStridedRangeKHR bufferRagge = {
-                    .size = demo->descriptorHeapProperties.bufferDescriptorSize,
-                    .stride = demo->descriptorHeapProperties.bufferHeapDescriptorAlignment,
-                    .pData = ((char*)pData + ii * demo->descriptorHeapProperties.bufferHeapDescriptorAlignment),
-                };
-
-                VkBufferDeviceAddressInfo addressInfo = {
-                    .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
-                    .pNext = NULL,
-                    .buffer = demo->swapchain_image_resources[i].uniform_buffer
-                    };
-
-                VkBufferDescriptorInfoKHR bufferDescInfo = {
-                    .sType = VK_STRUCTURE_TYPE_BUFFER_DESCRIPTOR_INFO_KHR,
-                    .pNext = NULL,
-                    .type  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-                    .addressRange.address = 0,
-                    .addressRange.size = sizeof(struct vktexcube_vs_uniform),
-                };
-
-                bufferDescInfo.addressRange.address = vkGetBufferDeviceAddressKHR(demo->device, &addressInfo);
-
-                err = vkWriteBufferDescriptorsKHR(demo->device, 1, &bufferDescInfo ,&bufferRagge);
-            }
-            else if (ii == imageHeap)
-            {
-                VkImageViewCreateInfo view = {
-                    .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-                    .pNext = NULL,
-                    .image = demo->textures[0].image,
-                    .viewType = VK_IMAGE_VIEW_TYPE_2D,
-                    .format = VK_FORMAT_R8G8B8A8_UNORM,
-                    .components =
-                        {
-                            VK_COMPONENT_SWIZZLE_IDENTITY,
-                            VK_COMPONENT_SWIZZLE_IDENTITY,
-                            VK_COMPONENT_SWIZZLE_IDENTITY,
-                            VK_COMPONENT_SWIZZLE_IDENTITY,
-                        },
-                    .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
-                    .flags = 0,
-                };
-
-                VkImageDescriptorImageInfoKHR Image = {
-                    .sType  = VK_STRUCTURE_TYPE_IMAGE_DESCRIPTOR_IMAGE_INFO_KHR,
-                    .pNext  = NULL,
-                    .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                    .pView  = &view,
-                };
-
-                VkImageDescriptorInfoKHR imageDescriptorInfo = {
-                    .sType = VK_STRUCTURE_TYPE_IMAGE_DESCRIPTOR_INFO_KHR,
-                    .pNext = NULL,
-                    .type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
-                    .data = {
-                        .pImage = &Image,
-                    }
-                };
-
-                const VkHostAddressStridedRangeKHR bufferRagge = {
-                    .size = demo->descriptorHeapProperties.imageDescriptorSize,
-                    .stride = demo->descriptorHeapProperties.imageHeapDescriptorAlignment,
-                    // .pData = (pData + ii * demo->descriptorHeapProperties.imageHeapDescriptorAlignment),
-                    // Since offset equal to 0;
-                    .pData = pData,
-
-                };
-
-                err = vkWriteImageDescriptorsKHR(demo->device, 1, &imageDescriptorInfo, &bufferRagge);
-            }
-            else if (ii == samplerHeap)
-            {
-                VkSamplerCreateInfo sampler = {
-                    .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
-                    .pNext = NULL,
-                    .magFilter = VK_FILTER_NEAREST,
-                    .minFilter = VK_FILTER_NEAREST,
-                    .mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
-                    .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
-                    .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
-                    .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
-                    .mipLodBias = 0.0f,
-                    .anisotropyEnable = VK_FALSE,
-                    .maxAnisotropy = 1,
-                    .compareOp = VK_COMPARE_OP_NEVER,
-                    .minLod = 0.0f,
-                    .maxLod = 0.0f,
-                    .borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE,
-                    .unnormalizedCoordinates = VK_FALSE,
-                };
-
-                //heap buffer host ponter
-                const VkHostAddressStridedRangeKHR bufferRagge = {
-                    .size = demo->descriptorHeapProperties.samplerDescriptorSize,
-                    .stride = demo->descriptorHeapProperties.samplerHeapDescriptorAlignment,
-                    // .pData = (pData + ii * demo->descriptorHeapProperties.samplerHeapDescriptorAlignment),
-                    // Since offset equal to 0;
-                    .pData = pData,
-
-                };
-
-                vkWriteSamplerDescriptorsKHR(demo->device, 1, &sampler, &bufferRagge);
-            }
-
-            vkUnmapMemory(demo->device, demo->swapchain_image_resources[i].descHeapMemory[ii]);
-        }
-    }
+    err = vkCreateDescriptorPool(demo->device, &descriptor_pool, NULL, &demo->desc_pool);
     assert(!err);
+}
+
+static void demo_prepare_descriptor_set(struct demo *demo) {
+    VkDescriptorImageInfo tex_descs[DEMO_TEXTURE_COUNT];
+    VkWriteDescriptorSet writes[3];
+    VkResult U_ASSERT_ONLY err;
+
+    VkDescriptorSetAllocateInfo alloc_info = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+                                              .pNext = NULL,
+                                              .descriptorPool = demo->desc_pool,
+                                              .descriptorSetCount = 1,
+                                              .pSetLayouts = &demo->desc_layout};
+
+    VkDescriptorBufferInfo buffer_info;
+    buffer_info.offset = 0;
+    buffer_info.range = sizeof(struct vktexcube_vs_uniform);
+
+    memset(&tex_descs, 0, sizeof(tex_descs));
+    for (unsigned int i = 0; i < DEMO_TEXTURE_COUNT; i++) {
+        tex_descs[i].sampler = demo->textures[i].sampler;
+        tex_descs[i].imageView = demo->textures[i].view;
+        tex_descs[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    }
+
+    memset(&writes, 0, sizeof(writes));
+
+    writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[0].descriptorCount = 1;
+    writes[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    writes[0].pBufferInfo = &buffer_info;
+
+    writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[1].dstBinding = 1;
+    writes[1].descriptorCount = 1;
+    writes[1].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+    writes[1].dstArrayElement = 0;
+    writes[1].pImageInfo = tex_descs;
+
+    writes[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[2].dstBinding = 2;
+    writes[2].descriptorCount = 1;
+    writes[2].dstArrayElement = 0;
+    writes[2].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    writes[2].pImageInfo = tex_descs;
+
+    for (unsigned int i = 0; i < demo->swapchainImageCount; i++) {
+        err = vkAllocateDescriptorSets(demo->device, &alloc_info, &demo->swapchain_image_resources[i].descriptor_set);
+        assert(!err);
+        buffer_info.buffer = demo->swapchain_image_resources[i].uniform_buffer;
+        writes[0].dstSet = demo->swapchain_image_resources[i].descriptor_set;
+        writes[1].dstSet = demo->swapchain_image_resources[i].descriptor_set;
+        writes[2].dstSet = demo->swapchain_image_resources[i].descriptor_set;
+        vkUpdateDescriptorSets(demo->device, 3, writes, 0, NULL);
+    }
 }
 
 static void demo_prepare_framebuffers(struct demo *demo) {
@@ -2622,7 +2334,7 @@ static void demo_prepare(struct demo *demo) {
     demo_prepare_textures(demo);
     demo_prepare_cube_data_buffers(demo);
 
-    // demo_prepare_descriptor_layout(demo);
+    demo_prepare_descriptor_layout(demo);
     demo_prepare_render_pass(demo);
     demo_prepare_pipeline(demo);
 
@@ -2657,9 +2369,8 @@ static void demo_prepare(struct demo *demo) {
         }
     }
 
-    // demo_prepare_descriptor_pool(demo);
-    // demo_prepare_descriptor_set(demo);
-    demo_prepare_descriptor_heap(demo);
+    demo_prepare_descriptor_pool(demo);
+    demo_prepare_descriptor_set(demo);
 
     demo_prepare_framebuffers(demo);
 
@@ -4023,17 +3734,6 @@ static void demo_init_vk(struct demo *demo) {
             if (!strcmp("VK_KHR_portability_subset", device_extensions[i].extensionName)) {
                 demo->extension_names[demo->enabled_extension_count++] = "VK_KHR_portability_subset";
             }
-            // VK_KHR_DESCRIPTOR_HEAP
-            if (!strcmp(VK_KHR_DESCRIPTOR_HEAP_EXTENSION_NAME, device_extensions[i].extensionName))
-            {
-                demo->extension_names[demo->enabled_extension_count++] = VK_KHR_DESCRIPTOR_HEAP_EXTENSION_NAME;
-            }
-            // VK_KHR_buffer_device_address
-            if (!strcmp(VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME, device_extensions[i].extensionName))
-            {
-                demo->extension_names[demo->enabled_extension_count++] = VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME;
-            }
-
             assert(demo->enabled_extension_count < 64);
         }
 
@@ -4112,26 +3812,6 @@ static void demo_init_vk(struct demo *demo) {
     //  features based on this query
     VkPhysicalDeviceFeatures physDevFeatures;
     vkGetPhysicalDeviceFeatures(demo->gpu, &physDevFeatures);
-
-    VkPhysicalDeviceFeatures2 features2 = {};
-    features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
-
-    // VkPhysicalDeviceDescriptorHeapFeaturesKHR descriptorHeapFeature = {};
-    demo->descriptorHeapFeature.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_HEAP_FEATURES_KHR;
-    demo->descriptorHeapFeature.pNext = NULL;
-
-    features2.pNext = (void*)(&demo->descriptorHeapFeature);
-    vkGetPhysicalDeviceFeatures2(demo->gpu, &features2);
-
-    VkPhysicalDeviceProperties2 properties2 = {};
-    properties2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
-
-    // VkPhysicalDeviceDescriptorHeapPropertiesKHR descriptorHeapProperties = {};
-    demo->descriptorHeapProperties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_HEAP_PROPERTIES_KHR;
-    demo->descriptorHeapProperties.pNext = NULL;
-    properties2.pNext = (void *)(&demo->descriptorHeapProperties);
-    vkGetPhysicalDeviceProperties2(demo->gpu, &properties2);
-
 }
 
 static void demo_create_device(struct demo *demo) {

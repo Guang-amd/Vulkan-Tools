@@ -231,10 +231,10 @@ elseif(CMAKE_SYSTEM_NAME MATCHES "Linux|BSD|GNU")
     add_executable(vkcube)
     target_sources(vkcube PRIVATE
         cube.c
-        ${PROJECT_SOURCE_DIR}/cube/cube.vert
-        ${PROJECT_SOURCE_DIR}/cube/cube.frag
-        cube.vert.inc
-        cube.frag.inc
+        ${PROJECT_SOURCE_DIR}/cube/cube-nc.vert
+        ${PROJECT_SOURCE_DIR}/cube/cube-nc.frag
+        cube-nc.vert.inc
+        cube-nc.frag.inc
         ${OPTIONAL_WAYLAND_DATA_FILES}
     )
     target_compile_definitions(vkcube PUBLIC ${CUBE_PLATFORM})
@@ -248,10 +248,10 @@ elseif(WIN32)
     add_executable(vkcube WIN32)
     target_sources(vkcube PRIVATE
         cube.c
-        ${PROJECT_SOURCE_DIR}/cube/cube.vert
-        ${PROJECT_SOURCE_DIR}/cube/cube.frag
-        cube.vert.inc
-        cube.frag.inc
+        ${PROJECT_SOURCE_DIR}/cube/cube-nc.vert
+        ${PROJECT_SOURCE_DIR}/cube/cube-nc.frag
+        cube-nc.vert.inc
+        cube-nc.frag.inc
     )
     target_link_libraries(vkcube PRIVATE Vulkan::Headers volk::volk_headers)
 else()
@@ -358,3 +358,39 @@ if (CMAKE_SYSTEM_NAME MATCHES "Linux|BSD")
         install(TARGETS vkcube-wayland)
     endif()
 endif()
+
+
+# ----------------------------------------------------------------------------
+# vkcube-heap
+
+if(CMAKE_SYSTEM_NAME MATCHES "Linux|BSD|GNU")
+    add_executable(vkcube-heap)
+    target_sources(vkcube-heap PRIVATE
+        cube-heap.c
+        ${PROJECT_SOURCE_DIR}/cube/cube.vert
+        ${PROJECT_SOURCE_DIR}/cube/cube.frag
+        cube.vert.inc
+        cube.frag.inc
+        ${OPTIONAL_WAYLAND_DATA_FILES}
+    )
+    target_compile_definitions(vkcube-heap PUBLIC ${CUBE_PLATFORM})
+    include(CheckLibraryExists)
+    CHECK_LIBRARY_EXISTS("rt" clock_gettime "" NEED_RT)
+    if (NEED_RT)
+        target_link_libraries(vkcube-heap PRIVATE rt)
+    endif()
+    target_link_libraries(vkcube-heap PRIVATE Vulkan::Headers volk::volk_headers Threads::Threads)
+else()
+    add_executable(vkcube-heap
+                   WIN32
+                   cube-heap.c
+                   ${PROJECT_SOURCE_DIR}/cube/cube.vert
+                   ${PROJECT_SOURCE_DIR}/cube/cube.frag
+                   cube.vert.inc
+                   cube.frag.inc)
+    target_link_libraries(vkcube-heap Vulkan::Headers volk::volk_headers)
+endif()
+
+target_include_directories(vkcube-heap PRIVATE .)
+
+install(TARGETS vkcube-heap)

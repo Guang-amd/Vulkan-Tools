@@ -15,7 +15,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ~~~
-cmake_minimum_required(VERSION 3.17.2)
+cmake_minimum_required(VERSION 3.22.1)
 
 project(Vulkan-Tools)
 
@@ -148,7 +148,6 @@ if(BUILD_ICD)
     add_subdirectory(icd)
 endif()
 
-add_subdirectory(windows-runtime-installer)
 
 if(BUILD_TESTS)
     enable_testing()

@@ -2,6 +2,7 @@
  * Copyright (c) 2015-2019 The Khronos Group Inc.
  * Copyright (c) 2015-2019 Valve Corporation
  * Copyright (c) 2015-2019 LunarG, Inc.
+ * Copyright (c) 2025 The Fuchsia Authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,14 +20,7 @@
  * Author: Charles Giessen <charles@lunarg.com>
  */
 
-#if defined(VK_USE_PLATFORM_XLIB_KHR) || defined(VK_USE_PLATFORM_XCB_KHR)
-#include <X11/Xutil.h>
-#elif defined(VK_USE_PLATFORM_WAYLAND_KHR)
-#include <linux/input.h>
-#include "xdg-shell-client-header.h"
-#include "xdg-decoration-client-header.h"
-#endif
-
+#include <algorithm>
 #include <cassert>
 #include <cinttypes>
 #include <cstdio>
@@ -37,6 +31,27 @@
 #include <sstream>
 #include <iostream>
 #include <memory>
+#include <map>
+
+#if defined(VK_USE_PLATFORM_XLIB_KHR)
+#include "xlib_loader.h"
+#endif
+#if defined(VK_USE_PLATFORM_XCB_KHR)
+#include "xcb_loader.h"
+#endif
+#if defined(VK_USE_PLATFORM_WAYLAND_KHR)
+#include <linux/input.h>
+#include "wayland_loader.h"
+#endif
+#if defined(VK_USE_PLATFORM_FUCHSIA)
+#include <fidl/fuchsia.ui.app/cpp/fidl.h>
+#include <lib/async-loop/cpp/loop.h>
+#include <lib/component/incoming/cpp/protocol.h>
+#include <lib/component/outgoing/cpp/outgoing_directory.h>
+#include <lib/zx/result.h>
+
+#include "fuchsia/flatland_view.h"
+#endif
 
 #define VULKAN_HPP_DISPATCH_LOADER_DYNAMIC 1
 #define VULKAN_HPP_NO_EXCEPTIONS
@@ -197,6 +212,108 @@ static const float g_uv_buffer_data[] = {
     1.0f, 0.0f,
 };
 // clang-format on
+enum class WsiPlatform {
+    auto_ = 0,
+    win32,
+    metal,
+    android,
+    qnx,
+    xcb,
+    xlib,
+    wayland,
+    directfb,
+    display,
+    fuchsia_display,
+    fuchsia_scenic,
+    invalid,  // Sentinel just to indicate invalid user input
+};
+
+WsiPlatform wsi_from_string(std::string const &str) {
+    if (str == "auto") return WsiPlatform::auto_;
+#if defined(VK_USE_PLATFORM_WIN32_KHR)
+    if (str == "win32") return WsiPlatform::win32;
+#endif
+#if defined(VK_USE_PLATFORM_METAL_EXT)
+    if (str == "metal") return WsiPlatform::metal;
+#endif
+#if defined(VK_USE_PLATFORM_ANDROID_KHR)
+    if (str == "android") return WsiPlatform::android;
+#endif
+#if defined(VK_USE_PLATFORM_SCREEN_QNX)
+    if (str == "qnx") return WsiPlatform::qnx;
+#endif
+#if defined(VK_USE_PLATFORM_XCB_KHR)
+    if (str == "xcb") return WsiPlatform::xcb;
+#endif
+#if defined(VK_USE_PLATFORM_XLIB_KHR)
+    if (str == "xlib") return WsiPlatform::xlib;
+#endif
+#if defined(VK_USE_PLATFORM_WAYLAND_KHR)
+    if (str == "wayland") return WsiPlatform::wayland;
+#endif
+#if defined(VK_USE_PLATFORM_DIRECTFB_EXT)
+    if (str == "directfb") return WsiPlatform::directfb;
+#endif
+#if defined(VK_USE_PLATFORM_DISPLAY_KHR)
+    if (str == "display") return WsiPlatform::display;
+#endif
+#if defined(VK_USE_PLATFORM_FUCHSIA)
+    if (str == "fuchsia_display") return WsiPlatform::fuchsia_display;
+    if (str == "fuchsia_scenic") return WsiPlatform::fuchsia_scenic;
+#endif
+    return WsiPlatform::invalid;
+};
+
+const char *wsi_to_string(WsiPlatform wsi_platform) {
+    switch (wsi_platform) {
+        case (WsiPlatform::auto_):
+            return "auto";
+#if defined(VK_USE_PLATFORM_WIN32_KHR)
+        case (WsiPlatform::win32):
+            return "win32";
+#endif
+#if defined(VK_USE_PLATFORM_METAL_EXT)
+        case (WsiPlatform::metal):
+            return "metal";
+#endif
+#if defined(VK_USE_PLATFORM_ANDROID_KHR)
+        case (WsiPlatform::android):
+            return "android";
+#endif
+#if defined(VK_USE_PLATFORM_SCREEN_QNX)
+        case (WsiPlatform::qnx):
+            return "qnx";
+#endif
+#if defined(VK_USE_PLATFORM_XCB_KHR)
+        case (WsiPlatform::xcb):
+            return "xcb";
+#endif
+#if defined(VK_USE_PLATFORM_XLIB_KHR)
+        case (WsiPlatform::xlib):
+            return "xlib";
+#endif
+#if defined(VK_USE_PLATFORM_WAYLAND_KHR)
+        case (WsiPlatform::wayland):
+            return "wayland";
+#endif
+#if defined(VK_USE_PLATFORM_DIRECTFB_EXT)
+        case (WsiPlatform::directfb):
+            return "directfb";
+#endif
+#if defined(VK_USE_PLATFORM_DISPLAY_KHR)
+        case (WsiPlatform::display):
+            return "display";
+#endif
+#if defined(VK_USE_PLATFORM_FUCHSIA)
+        case (WsiPlatform::fuchsia_display):
+            return "fuchsia_display";
+        case (WsiPlatform::fuchsia_scenic):
+            return "fuchsia_scenic";
+#endif
+        default:
+            return "unknown";
+    }
+};
 
 struct SwapchainImageResources {
     vk::Image image;
@@ -222,8 +339,9 @@ struct Demo {
     void prepare_init_cmd();
     void flush_init_cmd();
     void init(int argc, char **argv);
-    void init_connection();
+    void check_and_set_wsi_platform();
     void init_vk();
+    void select_physical_device();
     void init_vk_swapchain();
     void prepare();
     void prepare_buffers();
@@ -252,37 +370,53 @@ struct Demo {
     bool memory_type_from_properties(uint32_t typeBits, vk::MemoryPropertyFlags requirements_mask, uint32_t &typeIndex);
     vk::SurfaceFormatKHR pick_surface_format(const std::vector<vk::SurfaceFormatKHR> &surface_formats);
 
-    static VKAPI_ATTR VkBool32 VKAPI_CALL debug_messenger_callback(VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
-                                                                   VkDebugUtilsMessageTypeFlagsEXT messageType,
-                                                                   const VkDebugUtilsMessengerCallbackDataEXT *pCallbackData,
-                                                                   void *pUserData);
+    static VKAPI_ATTR vk::Bool32 VKAPI_CALL debug_messenger_callback(vk::DebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
+                                                                     vk::DebugUtilsMessageTypeFlagsEXT messageType,
+                                                                     const vk::DebugUtilsMessengerCallbackDataEXT *pCallbackData,
+                                                                     void *pUserData);
 
 #if defined(VK_USE_PLATFORM_WIN32_KHR)
     void run();
     void create_window();
-#elif defined(VK_USE_PLATFORM_XLIB_KHR)
+#endif
+#if defined(VK_USE_PLATFORM_XLIB_KHR)
+    const char *init_xlib_connection();
     void create_xlib_window();
     void handle_xlib_event(const XEvent *event);
     void run_xlib();
-#elif defined(VK_USE_PLATFORM_XCB_KHR)
+#endif
+#if defined(VK_USE_PLATFORM_XCB_KHR)
+    const char *init_xcb_connection();
     void handle_xcb_event(const xcb_generic_event_t *event);
     void run_xcb();
     void create_xcb_window();
-#elif defined(VK_USE_PLATFORM_WAYLAND_KHR)
-    void run();
-    void create_window();
-#elif defined(VK_USE_PLATFORM_DIRECTFB_EXT)
+#endif
+#if defined(VK_USE_PLATFORM_WAYLAND_KHR)
+    const char *init_wayland_connection();
+    void run_wayland();
+    void create_wayland_window();
+#endif
+#if defined(VK_USE_PLATFORM_DIRECTFB_EXT)
     void handle_directfb_event(const DFBInputEvent *event);
     void run_directfb();
     void create_directfb_window();
-#elif defined(VK_USE_PLATFORM_METAL_EXT)
+#endif
+#if defined(VK_USE_PLATFORM_METAL_EXT)
     void run();
-#elif defined(VK_USE_PLATFORM_DISPLAY_KHR)
+#endif
+#if defined(VK_USE_PLATFORM_DISPLAY_KHR)
     vk::Result create_display_surface();
     void run_display();
-#elif defined(VK_USE_PLATFORM_SCREEN_QNX)
+#endif
+#if defined(VK_USE_PLATFORM_SCREEN_QNX)
     void run();
     void create_window();
+#endif
+#if defined(VK_USE_PLATFORM_FUCHSIA)
+    // Returns a layer name of static storage duration.
+    const char *get_fuchsia_image_pipe_layer() const;
+    void create_flatland_view();
+    void run();
 #endif
 
     std::string name = "vkcubepp";  // Name to put on the window/icon
@@ -290,20 +424,26 @@ struct Demo {
     HINSTANCE connection = nullptr;  // hInstance - Windows Instance
     HWND window = nullptr;           // hWnd - window handle
     POINT minsize = {0, 0};          // minimum window size
-#elif defined(VK_USE_PLATFORM_XLIB_KHR)
+#endif
+#if defined(VK_USE_PLATFORM_XLIB_KHR)
+    void *xlib_library;
     Window xlib_window = 0;
     Atom xlib_wm_delete_window = 0;
-    Display *display = nullptr;
-#elif defined(VK_USE_PLATFORM_XCB_KHR)
+    Display *xlib_display = nullptr;
+#endif
+#if defined(VK_USE_PLATFORM_XCB_KHR)
+    void *xcb_library;
     xcb_window_t xcb_window = 0;
     xcb_screen_t *screen = nullptr;
     xcb_connection_t *connection = nullptr;
     xcb_intern_atom_reply_t *atom_wm_delete_window = nullptr;
-#elif defined(VK_USE_PLATFORM_WAYLAND_KHR)
-    wl_display *display = nullptr;
+#endif
+#if defined(VK_USE_PLATFORM_WAYLAND_KHR)
+    void *wayland_library = nullptr;
+    wl_display *wayland_display = nullptr;
     wl_registry *registry = nullptr;
     wl_compositor *compositor = nullptr;
-    wl_surface *window = nullptr;
+    wl_surface *wayland_window = nullptr;
     xdg_wm_base *wm_base = nullptr;
     zxdg_decoration_manager_v1 *xdg_decoration_mgr = nullptr;
     zxdg_toplevel_decoration_v1 *toplevel_decoration = nullptr;
@@ -313,18 +453,29 @@ struct Demo {
     wl_seat *seat = nullptr;
     wl_pointer *pointer = nullptr;
     wl_keyboard *keyboard = nullptr;
-#elif defined(VK_USE_PLATFORM_DIRECTFB_EXT)
+#endif
+#if defined(VK_USE_PLATFORM_DIRECTFB_EXT)
     IDirectFB *dfb = nullptr;
-    IDirectFBSurface *window = nullptr;
+    IDirectFBSurface *directfb_window = nullptr;
     IDirectFBEventBuffer *event_buffer = nullptr;
-#elif defined(VK_USE_PLATFORM_METAL_EXT)
+#endif
+#if defined(VK_USE_PLATFORM_METAL_EXT)
     void *caMetalLayer;
-#elif defined(VK_USE_PLATFORM_SCREEN_QNX)
+#endif
+#if defined(VK_USE_PLATFORM_SCREEN_QNX)
     screen_context_t screen_context = nullptr;
     screen_window_t screen_window = nullptr;
     screen_event_t screen_event = nullptr;
 #endif
-
+#if defined(VK_USE_PLATFORM_FUCHSIA)
+    fuchsia_ui_views::ViewCreationToken view_creation_token;
+    async::Loop loop{&kAsyncLoopConfigNeverAttachToThread};
+    fidl::ClientEnd<fuchsia_io::Directory> incoming;
+    std::unique_ptr<component::OutgoingDirectory> outgoing;
+    std::unique_ptr<FlatlandViewProviderService> view_provider_service;
+    std::unique_ptr<FlatlandView> flatland_view;
+#endif
+    WsiPlatform wsi_platform = WsiPlatform::auto_;
     vk::SurfaceKHR surface;
     bool prepared = false;
     bool use_staging_buffer = false;
@@ -596,32 +747,44 @@ void Demo::cleanup() {
     inst.destroySurfaceKHR(surface);
 
 #if defined(VK_USE_PLATFORM_XLIB_KHR)
-    XDestroyWindow(display, xlib_window);
-    XCloseDisplay(display);
-#elif defined(VK_USE_PLATFORM_XCB_KHR)
-    xcb_destroy_window(connection, xcb_window);
-    xcb_disconnect(connection);
-    free(atom_wm_delete_window);
-#elif defined(VK_USE_PLATFORM_WAYLAND_KHR)
-    if (keyboard) wl_keyboard_destroy(keyboard);
-    if (pointer) wl_pointer_destroy(pointer);
-    if (seat) wl_seat_destroy(seat);
-    xdg_toplevel_destroy(window_toplevel);
-    xdg_surface_destroy(window_surface);
-    wl_surface_destroy(window);
-    xdg_wm_base_destroy(wm_base);
-    if (xdg_decoration_mgr) {
-        zxdg_toplevel_decoration_v1_destroy(toplevel_decoration);
-        zxdg_decoration_manager_v1_destroy(xdg_decoration_mgr);
+    if (wsi_platform == WsiPlatform::xlib) {
+        XDestroyWindow(xlib_display, xlib_window);
+        XCloseDisplay(xlib_display);
     }
-    wl_compositor_destroy(compositor);
-    wl_registry_destroy(registry);
-    wl_display_disconnect(display);
-#elif defined(VK_USE_PLATFORM_DIRECTFB_EXT)
-    event_buffer->Release(event_buffer);
-    window->Release(window);
-    dfb->Release(dfb);
-#elif defined(VK_USE_PLATFORM_SCREEN_QNX)
+#endif
+#if defined(VK_USE_PLATFORM_XCB_KHR)
+    if (wsi_platform == WsiPlatform::xcb) {
+        xcb_destroy_window(connection, xcb_window);
+        xcb_disconnect(connection);
+        free(atom_wm_delete_window);
+    }
+#endif
+#if defined(VK_USE_PLATFORM_WAYLAND_KHR)
+    if (wsi_platform == WsiPlatform::wayland) {
+        if (keyboard) wl_keyboard_destroy(keyboard);
+        if (pointer) wl_pointer_destroy(pointer);
+        if (seat) wl_seat_destroy(seat);
+        xdg_toplevel_destroy(window_toplevel);
+        xdg_surface_destroy(window_surface);
+        wl_surface_destroy(wayland_window);
+        xdg_wm_base_destroy(wm_base);
+        if (xdg_decoration_mgr) {
+            zxdg_toplevel_decoration_v1_destroy(toplevel_decoration);
+            zxdg_decoration_manager_v1_destroy(xdg_decoration_mgr);
+        }
+        wl_compositor_destroy(compositor);
+        wl_registry_destroy(registry);
+        wl_display_disconnect(wayland_display);
+    }
+#endif
+#if defined(VK_USE_PLATFORM_DIRECTFB_EXT)
+    if (wsi_platform == WsiPlatform::directfb) {
+        event_buffer->Release(event_buffer);
+        directfb_window->Release(directfb_window);
+        dfb->Release(dfb);
+    }
+#endif
+#if defined(VK_USE_PLATFORM_SCREEN_QNX)
     screen_destroy_event(screen_event);
     screen_destroy_window(screen_window);
     screen_destroy_context(screen_context);
@@ -887,7 +1050,7 @@ void Demo::init(int argc, char **argv) {
             continue;
         }
         if (strcmp(argv[i], "--xlib") == 0) {
-            fprintf(stderr, "--xlib is deprecated and no longer does anything");
+            fprintf(stderr, "--xlib is deprecated and no longer does anything\n");
             continue;
         }
         if (strcmp(argv[i], "--c") == 0 && frameCount == UINT32_MAX && i < argc - 1 &&
@@ -935,6 +1098,67 @@ void Demo::init(int argc, char **argv) {
             force_errors = true;
             continue;
         }
+        if ((strcmp(argv[i], "--wsi") == 0) && (i < argc - 1)) {
+            std::string selection_input = argv[i + 1];
+            for (char &c : selection_input) {
+                c = static_cast<char>(std::tolower(c));
+            }
+            WsiPlatform selection = wsi_from_string(selection_input);
+            if (selection == WsiPlatform::invalid) {
+                printf(
+                    "The --wsi parameter %s is not a supported WSI platform. The list of available platforms is available from "
+                    "--help\n",
+                    (const char *)&(argv[i + 1][0]));
+                fflush(stdout);
+                exit(1);
+            }
+            wsi_platform = selection;
+            i++;
+            continue;
+        }
+
+        std::string wsi_platforms;
+#if defined(VK_USE_PLATFORM_XCB_KHR)
+        wsi_platforms.append("xcb");
+#endif
+#if defined(VK_USE_PLATFORM_XLIB_KHR)
+        if (!wsi_platforms.empty()) wsi_platforms.append("|");
+        wsi_platforms.append("xlib");
+#endif
+#if defined(VK_USE_PLATFORM_WAYLAND_KHR)
+        if (!wsi_platforms.empty()) wsi_platforms.append("|");
+        wsi_platforms.append("wayland");
+#endif
+#if defined(VK_USE_PLATFORM_DIRECTFB_EXT)
+        if (!wsi_platforms.empty()) wsi_platforms.append("|");
+        wsi_platforms.append("directfb");
+#endif
+#if defined(VK_USE_PLATFORM_DISPLAY_KHR)
+        if (!wsi_platforms.empty()) wsi_platforms.append("|");
+        wsi_platforms.append("display");
+#endif
+#if defined(VK_USE_PLATFORM_METAL_EXT)
+        if (!wsi_platforms.empty()) wsi_platforms.append("|");
+        wsi_platforms.append("metal");
+#endif
+#if defined(VK_USE_PLATFORM_WIN32_KHR)
+        if (!wsi_platforms.empty()) wsi_platforms.append("|");
+        wsi_platforms.append("win32");
+#endif
+#if defined(VK_USE_PLATFORM_ANDROID_KHR)
+        if (!wsi_platforms.empty()) wsi_platforms.append("|");
+        wsi_platforms.append("android");
+#endif
+#if defined(VK_USE_PLATFORM_SCREEN_QNX)
+        if (!wsi_platforms.empty()) wsi_platforms.append("|");
+        wsi_platforms.append("qnx");
+#endif
+#if defined(VK_USE_PLATFORM_FUCHSIA)
+        if (!wsi_platforms.empty()) wsi_platforms.append("|");
+        wsi_platforms.append("fuchsia_display");
+        if (!wsi_platforms.empty()) wsi_platforms.append("|");
+        wsi_platforms.append("fuchsia_scenic");
+#endif
         std::stringstream usage;
         usage << "Usage:\n  " << APP_SHORT_NAME << "\t[--use_staging] [--validate]\n"
               << "\t[--break] [--c <framecount>] [--suppress_popups]\n"
@@ -942,6 +1166,7 @@ void Demo::init(int argc, char **argv) {
               << "\t[--present_mode <present mode enum>]\n"
               << "\t[--width <width>] [--height <height>]\n"
               << "\t[--force_errors]\n"
+              << "\t[--wsi <" << wsi_platforms << ">]\n"
               << "\t<present_mode_enum>\n"
               << "\t\tVK_PRESENT_MODE_IMMEDIATE_KHR = " << VK_PRESENT_MODE_IMMEDIATE_KHR << "\n"
               << "\t\tVK_PRESENT_MODE_MAILBOX_KHR = " << VK_PRESENT_MODE_MAILBOX_KHR << "\n"
@@ -957,8 +1182,6 @@ void Demo::init(int argc, char **argv) {
         exit(1);
     }
 
-    init_connection();
-
     init_vk();
 
     spin_angle = 4.0f;
@@ -972,24 +1195,24 @@ void Demo::init(int argc, char **argv) {
     projection_matrix[1][1] *= -1;  // Flip projection matrix from GL to Vulkan orientation.
 }
 
-void Demo::init_connection() {
 #if defined(VK_USE_PLATFORM_XCB_KHR)
+const char *Demo::init_xcb_connection() {
+    xcb_library = initialize_xcb();
+    if (NULL == xcb_library) {
+        return "Cannot load XLIB dynamic library.";
+    }
     const xcb_setup_t *setup;
     xcb_screen_iterator_t iter;
     int scr;
 
     const char *display_envar = getenv("DISPLAY");
     if (display_envar == nullptr || display_envar[0] == '\0') {
-        printf("Environment variable DISPLAY requires a valid value.\nExiting ...\n");
-        fflush(stdout);
-        exit(1);
+        return "Environment variable DISPLAY requires a valid value.";
     }
 
     connection = xcb_connect(nullptr, &scr);
     if (xcb_connection_has_error(connection) > 0) {
-        printf("Cannot connect to XCB.\nExiting ...\n");
-        fflush(stdout);
-        exit(1);
+        return "Cannot connect to XCB.";
     }
 
     setup = xcb_get_setup(connection);
@@ -997,18 +1220,160 @@ void Demo::init_connection() {
     while (scr-- > 0) xcb_screen_next(&iter);
 
     screen = iter.data;
-#elif defined(VK_USE_PLATFORM_WAYLAND_KHR)
-    display = wl_display_connect(nullptr);
+    return NULL;
+}
+#endif
+#if defined(VK_USE_PLATFORM_XLIB_KHR)
+const char *Demo::init_xlib_connection() {
+    xlib_library = initialize_xlib();
+    if (NULL == xlib_library) {
+        return "Cannot load XLIB dynamic library.";
+    }
+    return NULL;
+}
+#endif
+#if defined(VK_USE_PLATFORM_WAYLAND_KHR)
+const char *Demo::init_wayland_connection() {
+    wayland_library = initialize_wayland();
+    if (NULL == wayland_library) {
+        return "Cannot load wayland dynamic library.";
+    }
+    wayland_display = wl_display_connect(nullptr);
 
-    if (display == nullptr) {
-        printf("Cannot connect to wayland.\nExiting ...\n");
-        fflush(stdout);
-        exit(1);
+    if (wayland_display == nullptr) {
+        return "Cannot connect to wayland.";
     }
 
-    registry = wl_display_get_registry(display);
+    registry = wl_display_get_registry(wayland_display);
     wl_registry_add_listener(registry, &registry_listener, this);
-    wl_display_dispatch(display);
+    wl_display_dispatch(wayland_display);
+    return NULL;
+}
+#endif
+
+void Demo::check_and_set_wsi_platform() {
+#if defined(VK_USE_PLATFORM_XCB_KHR)
+    if (wsi_platform == WsiPlatform::xcb || wsi_platform == WsiPlatform::auto_) {
+        auto found = std::find_if(enabled_instance_extensions.begin(), enabled_instance_extensions.end(),
+                                  [](const char *str) { return 0 == strcmp(str, VK_KHR_XCB_SURFACE_EXTENSION_NAME); });
+        if (found != enabled_instance_extensions.end()) {
+            const char *error_msg = init_xcb_connection();
+            if (error_msg != NULL) {
+                if (wsi_platform == WsiPlatform::xcb) {
+                    fprintf(stderr, "%s\nExiting ...\n", error_msg);
+                    fflush(stdout);
+                    exit(1);
+                }
+            } else {
+                wsi_platform = WsiPlatform::xcb;
+                return;
+            }
+        }
+    }
+#endif
+#if defined(VK_USE_PLATFORM_XLIB_KHR)
+    if (wsi_platform == WsiPlatform::xlib || wsi_platform == WsiPlatform::auto_) {
+        auto found = std::find_if(enabled_instance_extensions.begin(), enabled_instance_extensions.end(),
+                                  [](const char *str) { return 0 == strcmp(str, VK_KHR_XLIB_SURFACE_EXTENSION_NAME); });
+        if (found != enabled_instance_extensions.end()) {
+            const char *error_msg = init_xlib_connection();
+            if (error_msg != NULL) {
+                if (wsi_platform == WsiPlatform::xlib) {
+                    fprintf(stderr, "%s\nExiting ...\n", error_msg);
+                    fflush(stdout);
+                    exit(1);
+                }
+            } else {
+                wsi_platform = WsiPlatform::xlib;
+                return;
+            }
+        }
+    }
+#endif
+#if defined(VK_USE_PLATFORM_WAYLAND_KHR)
+    if (wsi_platform == WsiPlatform::wayland || wsi_platform == WsiPlatform::auto_) {
+        auto found = std::find_if(enabled_instance_extensions.begin(), enabled_instance_extensions.end(),
+                                  [](const char *str) { return 0 == strcmp(str, VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME); });
+        if (found != enabled_instance_extensions.end()) {
+            const char *error_msg = init_wayland_connection();
+            if (error_msg != NULL) {
+                if (wsi_platform == WsiPlatform::wayland) {
+                    fprintf(stderr, "%s\nExiting ...\n", error_msg);
+                    fflush(stdout);
+                    exit(1);
+                }
+            } else {
+                wsi_platform = WsiPlatform::wayland;
+                return;
+            }
+        }
+    }
+#endif
+#if defined(VK_USE_PLATFORM_DIRECTFB_EXT)
+    if (wsi_platform == WsiPlatform::directfb || wsi_platform == WsiPlatform::auto_) {
+        auto found = std::find_if(enabled_instance_extensions.begin(), enabled_instance_extensions.end(),
+                                  [](const char *str) { return 0 == strcmp(str, VK_EXT_DIRECTFB_SURFACE_EXTENSION_NAME); });
+        if (found != enabled_instance_extensions.end()) {
+            // Because DirectFB is still linked in, we can assume that it works if we got here
+            wsi_platform = WsiPlatform::directfb;
+            return;
+        }
+    }
+#endif
+#if defined(VK_USE_PLATFORM_WIN32_KHR)
+    if (wsi_platform == WsiPlatform::win32 || wsi_platform == WsiPlatform::auto_) {
+        auto found = std::find_if(enabled_instance_extensions.begin(), enabled_instance_extensions.end(),
+                                  [](const char *str) { return 0 == strcmp(str, VK_KHR_WIN32_SURFACE_EXTENSION_NAME); });
+        if (found != enabled_instance_extensions.end()) {
+            wsi_platform = WsiPlatform::win32;
+            return;
+        }
+    }
+#endif
+#if defined(VK_USE_PLATFORM_ANDROID_KHR)
+    if (wsi_platform == WsiPlatform::android || wsi_platform == WsiPlatform::auto_) {
+        auto found = std::find_if(enabled_instance_extensions.begin(), enabled_instance_extensions.end(),
+                                  [](const char *str) { return 0 == strcmp(str, VK_KHR_ANDROID_SURFACE_EXTENSION_NAME); });
+        if (found != enabled_instance_extensions.end()) {
+            wsi_platform = WsiPlatform::android;
+            return;
+        }
+    }
+#endif
+#if defined(VK_USE_PLATFORM_METAL_EXT)
+    if (wsi_platform == WsiPlatform::metal || wsi_platform == WsiPlatform::auto_) {
+        auto found = std::find_if(enabled_instance_extensions.begin(), enabled_instance_extensions.end(),
+                                  [](const char *str) { return 0 == strcmp(str, VK_EXT_METAL_SURFACE_EXTENSION_NAME); });
+        if (found != enabled_instance_extensions.end()) {
+            wsi_platform = WsiPlatform::metal;
+            return;
+        }
+    }
+#endif
+#if defined(VK_USE_PLATFORM_SCREEN_QNX)
+    if (wsi_platform == WsiPlatform::qnx || wsi_platform == WsiPlatform::auto_) {
+        auto found = std::find_if(enabled_instance_extensions.begin(), enabled_instance_extensions.end(),
+                                  [](const char *str) { return 0 == strcmp(str, VK_QNX_SCREEN_SURFACE_EXTENSION_NAME); });
+        if (found != enabled_instance_extensions.end()) {
+            wsi_platform = WsiPlatform::qnx;
+            return;
+        }
+    }
+#endif
+#if defined(VK_USE_PLATFORM_DISPLAY_KHR)
+    if (wsi_platform == WsiPlatform::display || wsi_platform == WsiPlatform::auto_) {
+        auto found = std::find_if(enabled_instance_extensions.begin(), enabled_instance_extensions.end(),
+                                  [](const char *str) { return 0 == strcmp(str, VK_KHR_DISPLAY_EXTENSION_NAME); });
+        if (found != enabled_instance_extensions.end()) {
+            wsi_platform = WsiPlatform::display;
+            return;
+        }
+    }
+#endif
+#if defined(VK_USE_PLATFORM_FUCHSIA)
+    if (wsi_platform == WsiPlatform::auto_) {
+        ERR_EXIT("auto WSI platform is not supported on Fuchsia", "check_and_set_wsi_platform error");
+    }
 #endif
 }
 #if defined(VK_USE_PLATFORM_DISPLAY_KHR)
@@ -1018,13 +1383,13 @@ int find_display_gpu(int gpu_number, const std::vector<vk::PhysicalDevice> &phys
     if (gpu_number >= 0) {
         auto display_props_return = physical_devices[gpu_number].getDisplayPropertiesKHR();
         VERIFY(display_props_return.result == vk::Result::eSuccess);
-        display_count = display_props_return.value.size();
+        display_count = static_cast<uint32_t>(display_props_return.value.size());
     } else {
         for (uint32_t i = 0; i < physical_devices.size(); i++) {
             auto display_props_return = physical_devices[i].getDisplayPropertiesKHR();
             VERIFY(display_props_return.result == vk::Result::eSuccess);
             if (display_props_return.value.size() > 0) {
-                display_count = display_props_return.value.size();
+                display_count = static_cast<uint32_t>(display_props_return.value.size());
                 gpu_return = i;
                 break;
             }
@@ -1036,10 +1401,10 @@ int find_display_gpu(int gpu_number, const std::vector<vk::PhysicalDevice> &phys
         return -1;
 }
 #endif
-VKAPI_ATTR VkBool32 VKAPI_CALL Demo::debug_messenger_callback(VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
-                                                              VkDebugUtilsMessageTypeFlagsEXT messageType,
-                                                              const VkDebugUtilsMessengerCallbackDataEXT *pCallbackData,
-                                                              void *pUserData) {
+VKAPI_ATTR vk::Bool32 VKAPI_CALL Demo::debug_messenger_callback(vk::DebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
+                                                                vk::DebugUtilsMessageTypeFlagsEXT messageType,
+                                                                const vk::DebugUtilsMessengerCallbackDataEXT *pCallbackData,
+                                                                void *pUserData) {
     std::ostringstream message;
     Demo &demo = *static_cast<Demo *>(pUserData);
 
@@ -1068,9 +1433,9 @@ VKAPI_ATTR VkBool32 VKAPI_CALL Demo::debug_messenger_callback(VkDebugUtilsMessag
                     << vk::to_string(vk::ObjectType(pCallbackData->pObjects[object].objectType)) << ", Handle ";
 
             // Print handle correctly if it is a dispatchable handle - aka a pointer
-            VkObjectType t = pCallbackData->pObjects[object].objectType;
-            if (t == VK_OBJECT_TYPE_INSTANCE || t == VK_OBJECT_TYPE_PHYSICAL_DEVICE || t == VK_OBJECT_TYPE_DEVICE ||
-                t == VK_OBJECT_TYPE_COMMAND_BUFFER || t == VK_OBJECT_TYPE_QUEUE) {
+            vk::ObjectType t = pCallbackData->pObjects[object].objectType;
+            if (t == vk::ObjectType::eInstance || t == vk::ObjectType::ePhysicalDevice || t == vk::ObjectType::eDevice ||
+                t == vk::ObjectType::eCommandBuffer || t == vk::ObjectType::eQueue) {
                 message << reinterpret_cast<void *>(static_cast<uintptr_t>(pCallbackData->pObjects[object].objectHandle));
             } else {
                 message << pCallbackData->pObjects[object].objectHandle;
@@ -1162,7 +1527,19 @@ void Demo::init_vk() {
     vk::Bool32 platformSurfaceExtFound = VK_FALSE;
     bool portabilityEnumerationActive = false;
 
-    auto instance_extensions_return = vk::enumerateInstanceExtensionProperties();
+    // Some platforms (for example, Fuchsia) may have their WSI instance
+    // extension in layers and require the client to manually specify the
+    // instance extension layer.
+    vk::Optional<const std::string> instance_extension_layer = nullptr;
+#if VK_USE_PLATFORM_FUCHSIA
+    const char *image_pipe_layer_name = get_fuchsia_image_pipe_layer();
+    enabled_layers.push_back(image_pipe_layer_name);
+
+    const std::string image_pipe_layer_name_str = image_pipe_layer_name;
+    instance_extension_layer = image_pipe_layer_name_str;
+#endif  // VK_USE_PLATFORM_FUCHSIA
+
+    auto instance_extensions_return = vk::enumerateInstanceExtensionProperties(instance_extension_layer);
     VERIFY(instance_extensions_return.result == vk::Result::eSuccess);
 
     for (const auto &extension : instance_extensions_return.value) {
@@ -1181,44 +1558,65 @@ void Demo::init_vk() {
             enabled_instance_extensions.push_back(VK_KHR_SURFACE_EXTENSION_NAME);
         }
 #if defined(VK_USE_PLATFORM_WIN32_KHR)
-        else if (!strcmp(VK_KHR_WIN32_SURFACE_EXTENSION_NAME, extension.extensionName)) {
+        else if (!strcmp(VK_KHR_WIN32_SURFACE_EXTENSION_NAME, extension.extensionName) &&
+                 (wsi_platform == WsiPlatform::auto_ || wsi_platform == WsiPlatform::win32)) {
             platformSurfaceExtFound = 1;
             enabled_instance_extensions.push_back(VK_KHR_WIN32_SURFACE_EXTENSION_NAME);
         }
-#elif defined(VK_USE_PLATFORM_XLIB_KHR)
-        else if (!strcmp(VK_KHR_XLIB_SURFACE_EXTENSION_NAME, extension.extensionName)) {
+#endif
+#if defined(VK_USE_PLATFORM_XLIB_KHR)
+        else if (!strcmp(VK_KHR_XLIB_SURFACE_EXTENSION_NAME, extension.extensionName) &&
+                 (wsi_platform == WsiPlatform::auto_ || wsi_platform == WsiPlatform::xlib)) {
             platformSurfaceExtFound = 1;
             enabled_instance_extensions.push_back(VK_KHR_XLIB_SURFACE_EXTENSION_NAME);
         }
-#elif defined(VK_USE_PLATFORM_XCB_KHR)
-        else if (!strcmp(VK_KHR_XCB_SURFACE_EXTENSION_NAME, extension.extensionName)) {
+#endif
+#if defined(VK_USE_PLATFORM_XCB_KHR)
+        else if (!strcmp(VK_KHR_XCB_SURFACE_EXTENSION_NAME, extension.extensionName) &&
+                 (wsi_platform == WsiPlatform::auto_ || wsi_platform == WsiPlatform::xcb)) {
             platformSurfaceExtFound = 1;
             enabled_instance_extensions.push_back(VK_KHR_XCB_SURFACE_EXTENSION_NAME);
         }
-#elif defined(VK_USE_PLATFORM_WAYLAND_KHR)
-        else if (!strcmp(VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME, extension.extensionName)) {
+#endif
+#if defined(VK_USE_PLATFORM_WAYLAND_KHR)
+        else if (!strcmp(VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME, extension.extensionName) &&
+                 (wsi_platform == WsiPlatform::auto_ || wsi_platform == WsiPlatform::wayland)) {
             platformSurfaceExtFound = 1;
             enabled_instance_extensions.push_back(VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME);
         }
-#elif defined(VK_USE_PLATFORM_DIRECTFB_EXT)
-        else if (!strcmp(VK_EXT_DIRECTFB_SURFACE_EXTENSION_NAME, extension.extensionName)) {
+#endif
+#if defined(VK_USE_PLATFORM_DIRECTFB_EXT)
+        else if (!strcmp(VK_EXT_DIRECTFB_SURFACE_EXTENSION_NAME, extension.extensionName) &&
+                 (wsi_platform == WsiPlatform::auto_ || wsi_platform == WsiPlatform::directfb)) {
             platformSurfaceExtFound = 1;
             enabled_instance_extensions.push_back(VK_EXT_DIRECTFB_SURFACE_EXTENSION_NAME);
         }
-#elif defined(VK_USE_PLATFORM_DISPLAY_KHR)
-        else if (!strcmp(VK_KHR_DISPLAY_EXTENSION_NAME, extension.extensionName)) {
+#endif
+#if defined(VK_USE_PLATFORM_DISPLAY_KHR)
+        else if (!strcmp(VK_KHR_DISPLAY_EXTENSION_NAME, extension.extensionName) &&
+                 (wsi_platform == WsiPlatform::auto_ || wsi_platform == WsiPlatform::display)) {
             platformSurfaceExtFound = 1;
             enabled_instance_extensions.push_back(VK_KHR_DISPLAY_EXTENSION_NAME);
         }
-#elif defined(VK_USE_PLATFORM_METAL_EXT)
-        else if (!strcmp(VK_EXT_METAL_SURFACE_EXTENSION_NAME, extension.extensionName)) {
+#endif
+#if defined(VK_USE_PLATFORM_METAL_EXT)
+        else if (!strcmp(VK_EXT_METAL_SURFACE_EXTENSION_NAME, extension.extensionName) &&
+                 (wsi_platform == WsiPlatform::auto_ || wsi_platform == WsiPlatform::metal)) {
             platformSurfaceExtFound = 1;
             enabled_instance_extensions.push_back(VK_EXT_METAL_SURFACE_EXTENSION_NAME);
         }
-#elif defined(VK_USE_PLATFORM_SCREEN_QNX)
-        else if (!strcmp(VK_QNX_SCREEN_SURFACE_EXTENSION_NAME, extension.extensionName)) {
+#endif
+#if defined(VK_USE_PLATFORM_SCREEN_QNX)
+        else if (!strcmp(VK_QNX_SCREEN_SURFACE_EXTENSION_NAME, extension.extensionName) &&
+                 (wsi_platform == WsiPlatform::auto_ || wsi_platform == WsiPlatform::qnx)) {
             platformSurfaceExtFound = 1;
             enabled_instance_extensions.push_back(VK_QNX_SCREEN_SURFACE_EXTENSION_NAME);
+        }
+#endif
+#if defined(VK_USE_PLATFORM_FUCHSIA)
+        else if (!strcmp(VK_FUCHSIA_IMAGEPIPE_SURFACE_EXTENSION_NAME, extension.extensionName)) {
+            platformSurfaceExtFound = 1;
+            enabled_instance_extensions.push_back(VK_FUCHSIA_IMAGEPIPE_SURFACE_EXTENSION_NAME);
         }
 #endif
     }
@@ -1233,56 +1631,103 @@ void Demo::init_vk() {
 
     if (!platformSurfaceExtFound) {
 #if defined(VK_USE_PLATFORM_WIN32_KHR)
-        ERR_EXIT("vkEnumerateInstanceExtensionProperties failed to find the " VK_KHR_WIN32_SURFACE_EXTENSION_NAME
-                 " extension.\n\n"
-                 "Do you have a compatible Vulkan installable client driver (ICD) installed?\n"
-                 "Please look at the Getting Started guide for additional information.\n",
-                 "vkCreateInstance Failure");
-#elif defined(VK_USE_PLATFORM_XCB_KHR)
-        ERR_EXIT("vkEnumerateInstanceExtensionProperties failed to find the " VK_KHR_XCB_SURFACE_EXTENSION_NAME
-                 " extension.\n\n"
-                 "Do you have a compatible Vulkan installable client driver (ICD) installed?\n"
-                 "Please look at the Getting Started guide for additional information.\n",
-                 "vkCreateInstance Failure");
-#elif defined(VK_USE_PLATFORM_WAYLAND_KHR)
-        ERR_EXIT("vkEnumerateInstanceExtensionProperties failed to find the " VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME
-                 " extension.\n\n"
-                 "Do you have a compatible Vulkan installable client driver (ICD) installed?\n"
-                 "Please look at the Getting Started guide for additional information.\n",
-                 "vkCreateInstance Failure");
-#elif defined(VK_USE_PLATFORM_XLIB_KHR)
-        ERR_EXIT("vkEnumerateInstanceExtensionProperties failed to find the " VK_KHR_XLIB_SURFACE_EXTENSION_NAME
-                 " extension.\n\n"
-                 "Do you have a compatible Vulkan installable client driver (ICD) installed?\n"
-                 "Please look at the Getting Started guide for additional information.\n",
-                 "vkCreateInstance Failure");
-#elif defined(VK_USE_PLATFORM_DIRECTFB_EXT)
-        ERR_EXIT("vkEnumerateInstanceExtensionProperties failed to find the " VK_EXT_DIRECTFB_SURFACE_EXTENSION_NAME
-                 " extension.\n\n"
-                 "Do you have a compatible Vulkan installable client driver (ICD) installed?\n"
-                 "Please look at the Getting Started guide for additional information.\n",
-                 "vkCreateInstance Failure");
-#elif defined(VK_USE_PLATFORM_DISPLAY_KHR)
-        ERR_EXIT("vkEnumerateInstanceExtensionProperties failed to find the " VK_KHR_DISPLAY_EXTENSION_NAME
-                 " extension.\n\n"
-                 "Do you have a compatible Vulkan installable client driver (ICD) installed?\n"
-                 "Please look at the Getting Started guide for additional information.\n",
-                 "vkCreateInstance Failure");
-#elif defined(VK_USE_PLATFORM_METAL_EXT)
-        ERR_EXIT("vkEnumerateInstanceExtensionProperties failed to find the " VK_EXT_METAL_SURFACE_EXTENSION_NAME
-                 " extension.\n\nDo you have a compatible "
-                 "Vulkan installable client driver (ICD) installed?\nPlease "
-                 "look at the Getting Started guide for additional "
-                 "information.\n",
-                 "vkCreateInstance Failure");
-#elif defined(VK_USE_PLATFORM_SCREEN_QNX)
-        ERR_EXIT("vkEnumerateInstanceExtensionProperties failed to find the " VK_QNX_SCREEN_SURFACE_EXTENSION_NAME
-                 " extension.\n\nDo you have a compatible "
-                 "Vulkan installable client driver (ICD) installed?\nPlease "
-                 "look at the Getting Started guide for additional "
-                 "information.\n",
-                 "vkCreateInstance Failure");
+        if (wsi_platform == WsiPlatform::win32) {
+            ERR_EXIT("vkEnumerateInstanceExtensionProperties failed to find the " VK_KHR_WIN32_SURFACE_EXTENSION_NAME
+                     " extension.\n\n"
+                     "Do you have a compatible Vulkan installable client driver (ICD) installed?\n"
+                     "Please look at the Getting Started guide for additional information.\n",
+                     "vkCreateInstance Failure");
+        }
 #endif
+#if defined(VK_USE_PLATFORM_XCB_KHR)
+        if (wsi_platform == WsiPlatform::xcb) {
+            ERR_EXIT("vkEnumerateInstanceExtensionProperties failed to find the " VK_KHR_XCB_SURFACE_EXTENSION_NAME
+                     " extension.\n\n"
+                     "Do you have a compatible Vulkan installable client driver (ICD) installed?\n"
+                     "Please look at the Getting Started guide for additional information.\n",
+                     "vkCreateInstance Failure");
+        }
+#endif
+#if defined(VK_USE_PLATFORM_WAYLAND_KHR)
+        if (wsi_platform == WsiPlatform::wayland) {
+            ERR_EXIT("vkEnumerateInstanceExtensionProperties failed to find the " VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME
+                     " extension.\n\n"
+                     "Do you have a compatible Vulkan installable client driver (ICD) installed?\n"
+                     "Please look at the Getting Started guide for additional information.\n",
+                     "vkCreateInstance Failure");
+        }
+#endif
+#if defined(VK_USE_PLATFORM_XLIB_KHR)
+        if (wsi_platform == WsiPlatform::xlib) {
+            ERR_EXIT("vkEnumerateInstanceExtensionProperties failed to find the " VK_KHR_XLIB_SURFACE_EXTENSION_NAME
+                     " extension.\n\n"
+                     "Do you have a compatible Vulkan installable client driver (ICD) installed?\n"
+                     "Please look at the Getting Started guide for additional information.\n",
+                     "vkCreateInstance Failure");
+        }
+#endif
+#if defined(VK_USE_PLATFORM_DIRECTFB_EXT)
+        if (wsi_platform == WsiPlatform::directfb) {
+            ERR_EXIT("vkEnumerateInstanceExtensionProperties failed to find the " VK_EXT_DIRECTFB_SURFACE_EXTENSION_NAME
+                     " extension.\n\n"
+                     "Do you have a compatible Vulkan installable client driver (ICD) installed?\n"
+                     "Please look at the Getting Started guide for additional information.\n",
+                     "vkCreateInstance Failure");
+        }
+#endif
+#if defined(VK_USE_PLATFORM_DISPLAY_KHR)
+        if (wsi_platform == WsiPlatform::display) {
+            ERR_EXIT("vkEnumerateInstanceExtensionProperties failed to find the " VK_KHR_DISPLAY_EXTENSION_NAME
+                     " extension.\n\n"
+                     "Do you have a compatible Vulkan installable client driver (ICD) installed?\n"
+                     "Please look at the Getting Started guide for additional information.\n",
+                     "vkCreateInstance Failure");
+        }
+#endif
+#if defined(VK_USE_PLATFORM_METAL_EXT)
+        if (wsi_platform == WsiPlatform::metal) {
+            ERR_EXIT("vkEnumerateInstanceExtensionProperties failed to find the " VK_EXT_METAL_SURFACE_EXTENSION_NAME
+                     " extension.\n\nDo you have a compatible "
+                     "Vulkan installable client driver (ICD) installed?\nPlease "
+                     "look at the Getting Started guide for additional "
+                     "information.\n",
+                     "vkCreateInstance Failure");
+        }
+#endif
+#if defined(VK_USE_PLATFORM_SCREEN_QNX)
+        if (wsi_platform == WsiPlatform::qnx) {
+            ERR_EXIT("vkEnumerateInstanceExtensionProperties failed to find the " VK_QNX_SCREEN_SURFACE_EXTENSION_NAME
+                     " extension.\n\nDo you have a compatible "
+                     "Vulkan installable client driver (ICD) installed?\nPlease "
+                     "look at the Getting Started guide for additional "
+                     "information.\n",
+                     "vkCreateInstance Failure");
+        }
+#endif
+#if defined(VK_USE_PLATFORM_FUCHSIA)
+        if (wsi_platform == WsiPlatform::fuchsia_display || wsi_platform == WsiPlatform::fuchsia_scenic) {
+            ERR_EXIT("vkEnumerateInstanceExtensionProperties failed to find the " VK_FUCHSIA_IMAGEPIPE_SURFACE_EXTENSION_NAME
+                     " extension.\n\nDo you have a compatible "
+                     "Vulkan installable client driver (ICD) installed?\nPlease "
+                     "look at the Getting Started guide for additional "
+                     "information.\n",
+                     "vkCreateInstance Failure");
+        }
+#endif
+        ERR_EXIT(
+            "vkEnumerateInstanceExtensionProperties failed to find any supported WSI surface extension.\n\n"
+            "Do you have a compatible Vulkan installable client driver (ICD) installed?\n"
+            "Please look at the Getting Started guide for additional information.\n",
+            "vkCreateInstance Failure");
+    }
+
+    bool auto_wsi_platform = wsi_platform == WsiPlatform::auto_;
+
+    check_and_set_wsi_platform();
+
+    // Print a message to indicate the automatically set WSI platform
+    if (auto_wsi_platform && wsi_platform != WsiPlatform::auto_) {
+        fprintf(stderr, "Selected WSI platform: %s\n", wsi_to_string(wsi_platform));
     }
 
     vk::DebugUtilsMessageSeverityFlagsEXT severityFlags(vk::DebugUtilsMessageSeverityFlagBitsEXT::eWarning |
@@ -1333,7 +1778,9 @@ void Demo::init_vk() {
         VERIFY(create_debug_messenger_return.result == vk::Result::eSuccess);
         debug_messenger = create_debug_messenger_return.value;
     }
+}
 
+void Demo::select_physical_device() {
     auto physical_device_return = inst.enumeratePhysicalDevices();
     VERIFY(physical_device_return.result == vk::Result::eSuccess);
     auto physical_devices = physical_device_return.value;
@@ -1350,46 +1797,54 @@ void Demo::init_vk() {
         fprintf(stderr, "GPU %d specified is not present, GPU count = %zu\n", gpu_number, physical_devices.size());
         ERR_EXIT("Specified GPU number is not present", "User Error");
     }
+
+    if (wsi_platform == WsiPlatform::display) {
 #if defined(VK_USE_PLATFORM_DISPLAY_KHR)
-    gpu_number = find_display_gpu(gpu_number, physical_devices);
-    if (gpu_number < 0) {
-        printf("Cannot find any display!\n");
+        gpu_number = find_display_gpu(gpu_number, physical_devices);
+        if (gpu_number < 0) {
+            printf("Cannot find any display!\n");
+            fflush(stdout);
+            exit(1);
+        }
+#else
+        printf("WSI selection was set to DISPLAY but vkcubepp was not compiled with support for the DISPLAY platform, exiting \n");
         fflush(stdout);
         exit(1);
-    }
-#else
-    /* Try to auto select most suitable device */
-    if (gpu_number == -1) {
-        constexpr uint32_t device_type_count = static_cast<uint32_t>(vk::PhysicalDeviceType::eCpu) + 1;
-        std::array<uint32_t, device_type_count> count_device_type{};
-
-        for (uint32_t i = 0; i < physical_devices.size(); i++) {
-            const auto physicalDeviceProperties = physical_devices[i].getProperties();
-            assert(physicalDeviceProperties.deviceType <= vk::PhysicalDeviceType::eCpu);
-            count_device_type[static_cast<int>(physicalDeviceProperties.deviceType)]++;
-        }
-
-        std::array<vk::PhysicalDeviceType, device_type_count> const device_type_preference = {
-            vk::PhysicalDeviceType::eDiscreteGpu, vk::PhysicalDeviceType::eIntegratedGpu, vk::PhysicalDeviceType::eVirtualGpu,
-            vk::PhysicalDeviceType::eCpu, vk::PhysicalDeviceType::eOther};
-
-        vk::PhysicalDeviceType search_for_device_type = vk::PhysicalDeviceType::eDiscreteGpu;
-        for (uint32_t i = 0; i < sizeof(device_type_preference) / sizeof(vk::PhysicalDeviceType); i++) {
-            if (count_device_type[static_cast<int>(device_type_preference[i])]) {
-                search_for_device_type = device_type_preference[i];
-                break;
-            }
-        }
-
-        for (uint32_t i = 0; i < physical_devices.size(); i++) {
-            const auto physicalDeviceProperties = physical_devices[i].getProperties();
-            if (physicalDeviceProperties.deviceType == search_for_device_type) {
-                gpu_number = i;
-                break;
-            }
-        }
-    }
 #endif
+    } else {
+        /* Try to auto select most suitable device */
+        if (gpu_number == -1) {
+            int prev_priority = 0;
+            for (uint32_t i = 0; i < physical_devices.size(); i++) {
+                const auto physicalDeviceProperties = physical_devices[i].getProperties();
+                assert(physicalDeviceProperties.deviceType <= vk::PhysicalDeviceType::eCpu);
+
+                auto support_result = physical_devices[i].getSurfaceSupportKHR(0, surface);
+                if (support_result.result != vk::Result::eSuccess ||
+                        support_result.value != vk::True) {
+                    continue;
+                }
+
+                std::map<vk::PhysicalDeviceType, int> device_type_priorities = {
+                    {vk::PhysicalDeviceType::eDiscreteGpu, 5},
+                    {vk::PhysicalDeviceType::eIntegratedGpu, 4},
+                    {vk::PhysicalDeviceType::eVirtualGpu, 3},
+                    {vk::PhysicalDeviceType::eCpu, 2},
+                    {vk::PhysicalDeviceType::eOther, 1},
+                };
+                int priority = -1;
+                if (device_type_priorities.find(physicalDeviceProperties.deviceType) !=
+                        device_type_priorities.end()) {
+                    priority = device_type_priorities[physicalDeviceProperties.deviceType];
+                }
+
+                if (priority > prev_priority) {
+                    gpu_number = i;
+                    prev_priority = priority;
+                }
+            }
+        }
+    }
     assert(gpu_number >= 0);
     gpu = physical_devices[gpu_number];
     {
@@ -1401,7 +1856,22 @@ void Demo::init_vk() {
     /* Look for device extensions */
     vk::Bool32 swapchainExtFound = VK_FALSE;
 
-    auto device_extension_return = gpu.enumerateDeviceExtensionProperties();
+    // Some platforms (for example, Fuchsia) may have their device swapchain
+    // extension in layers and require the client to manually specify the
+    // device swapchain extension layer.
+    vk::Optional<const std::string> device_extension_layer = nullptr;
+#if VK_USE_PLATFORM_FUCHSIA
+    const std::string image_pipe_layer_name = get_fuchsia_image_pipe_layer();
+    device_extension_layer = image_pipe_layer_name;
+#endif  // VK_USE_PLATFORM_FUCHSIA
+
+    // Currently we assume that the device swapchain extension layer is always
+    // enabled when the instance is initialized.
+    assert((!device_extension_layer) || (std::any_of(enabled_layers.begin(), enabled_layers.end(), [&](const char *layer_name) {
+               return *device_extension_layer == layer_name;
+           })));
+
+    auto device_extension_return = gpu.enumerateDeviceExtensionProperties(device_extension_layer);
     VERIFY(device_extension_return.result == vk::Result::eSuccess);
 
     for (const auto &extension : device_extension_return.value) {
@@ -1437,64 +1907,87 @@ void Demo::init_vk() {
 void Demo::create_surface() {
 // Create a WSI surface for the window:
 #if defined(VK_USE_PLATFORM_WIN32_KHR)
-    {
+    if (wsi_platform == WsiPlatform::win32) {
         auto const createInfo = vk::Win32SurfaceCreateInfoKHR().setHinstance(connection).setHwnd(window);
 
         auto result = inst.createWin32SurfaceKHR(&createInfo, nullptr, &surface);
         VERIFY(result == vk::Result::eSuccess);
     }
-#elif defined(VK_USE_PLATFORM_WAYLAND_KHR)
-    {
-        auto const createInfo = vk::WaylandSurfaceCreateInfoKHR().setDisplay(display).setSurface(window);
+#endif
+#if defined(VK_USE_PLATFORM_WAYLAND_KHR)
+
+    if (wsi_platform == WsiPlatform::wayland) {
+        auto const createInfo = vk::WaylandSurfaceCreateInfoKHR().setDisplay(wayland_display).setSurface(wayland_window);
 
         auto result = inst.createWaylandSurfaceKHR(&createInfo, nullptr, &surface);
         VERIFY(result == vk::Result::eSuccess);
+        return;
     }
-#elif defined(VK_USE_PLATFORM_XLIB_KHR)
-    {
-        auto const createInfo = vk::XlibSurfaceCreateInfoKHR().setDpy(display).setWindow(xlib_window);
+#endif
+#if defined(VK_USE_PLATFORM_XLIB_KHR)
+    if (wsi_platform == WsiPlatform::xlib) {
+        auto const createInfo = vk::XlibSurfaceCreateInfoKHR().setDpy(xlib_display).setWindow(xlib_window);
 
         auto result = inst.createXlibSurfaceKHR(&createInfo, nullptr, &surface);
         VERIFY(result == vk::Result::eSuccess);
     }
-#elif defined(VK_USE_PLATFORM_XCB_KHR)
-    {
+#endif
+#if defined(VK_USE_PLATFORM_XCB_KHR)
+    if (wsi_platform == WsiPlatform::xcb) {
         auto const createInfo = vk::XcbSurfaceCreateInfoKHR().setConnection(connection).setWindow(xcb_window);
 
         auto result = inst.createXcbSurfaceKHR(&createInfo, nullptr, &surface);
         VERIFY(result == vk::Result::eSuccess);
     }
-#elif defined(VK_USE_PLATFORM_DIRECTFB_EXT)
-    {
-        auto const createInfo = vk::DirectFBSurfaceCreateInfoEXT().setDfb(dfb).setSurface(window);
+#endif
+#if defined(VK_USE_PLATFORM_DIRECTFB_EXT)
+    if (wsi_platform == WsiPlatform::directfb) {
+        auto const createInfo = vk::DirectFBSurfaceCreateInfoEXT().setDfb(dfb).setSurface(directfb_window);
 
         auto result = inst.createDirectFBSurfaceEXT(&createInfo, nullptr, &surface);
         VERIFY(result == vk::Result::eSuccess);
     }
-#elif defined(VK_USE_PLATFORM_METAL_EXT)
+#endif
+#if defined(VK_USE_PLATFORM_METAL_EXT)
     {
         auto const createInfo = vk::MetalSurfaceCreateInfoEXT().setPLayer(static_cast<CAMetalLayer *>(caMetalLayer));
 
         auto result = inst.createMetalSurfaceEXT(&createInfo, nullptr, &surface);
         VERIFY(result == vk::Result::eSuccess);
     }
-#elif defined(VK_USE_PLATFORM_DISPLAY_KHR)
-    {
+#endif
+#if defined(VK_USE_PLATFORM_DISPLAY_KHR)
+    if (wsi_platform == WsiPlatform::display) {
         auto result = create_display_surface();
         VERIFY(result == vk::Result::eSuccess);
     }
-#elif defined(VK_USE_PLATFORM_SCREEN_QNX)
-    {
+#endif
+#if defined(VK_USE_PLATFORM_SCREEN_QNX)
+    if (wsi_platform == WsiPlatform::qnx) {
         auto const createInfo = vk::ScreenSurfaceCreateInfoQNX().setContext(screen_context).setWindow(screen_window);
 
         auto result = inst.createScreenSurfaceQNX(&createInfo, nullptr, &surface);
         VERIFY(result == vk::Result::eSuccess);
     }
 #endif
+#if defined(VK_USE_PLATFORM_FUCHSIA)
+    if (wsi_platform == WsiPlatform::fuchsia_display) {
+        auto createInfo = vk::ImagePipeSurfaceCreateInfoFUCHSIA();
+        auto result = inst.createImagePipeSurfaceFUCHSIA(&createInfo, nullptr, &surface);
+        VERIFY(result == vk::Result::eSuccess);
+    }
+    if (wsi_platform == WsiPlatform::fuchsia_scenic) {
+        auto createInfo = vk::ImagePipeSurfaceCreateInfoFUCHSIA();
+        // We are using ImagePipeSurface here, but it is being migrated to Flatland and the handle parameter is Flatland's
+        // ViewCreationToken during this process.
+        createInfo.setImagePipeHandle(std::move(view_creation_token).value().release());
+        auto result = inst.createImagePipeSurfaceFUCHSIA(&createInfo, nullptr, &surface);
+        VERIFY(result == vk::Result::eSuccess);
+    }
+#endif
 }
 
 void Demo::init_vk_swapchain() {
-    create_surface();
     // Iterate over each queue to learn whether it supports presenting:
     std::vector<vk::Bool32> supportsPresent;
     for (uint32_t i = 0; i < static_cast<uint32_t>(queue_props.size()); i++) {
@@ -2007,7 +2500,11 @@ void Demo::prepare_framebuffers() {
 
 vk::ShaderModule Demo::prepare_fs() {
     const uint32_t fragShaderCode[] = {
+#ifdef CUBE_FRAG_INC
+#include CUBE_FRAG_INC
+#else
 #include "cube.frag.inc"
+#endif
     };
 
     frag_shader_module = prepare_shader_module(fragShaderCode, sizeof(fragShaderCode));
@@ -2207,7 +2704,7 @@ void Demo::prepare_texture_image(const char *filename, texture_object &tex_obj, 
 
     auto const image_create_info = vk::ImageCreateInfo()
                                        .setImageType(vk::ImageType::e2D)
-                                       .setFormat(vk::Format::eR8G8B8A8Unorm)
+                                       .setFormat(vk::Format::eR8G8B8A8Srgb)
                                        .setExtent({tex_obj.tex_width, tex_obj.tex_height, 1})
                                        .setMipLevels(1)
                                        .setArrayLayers(1)
@@ -2254,7 +2751,7 @@ void Demo::prepare_texture_image(const char *filename, texture_object &tex_obj, 
 }
 
 void Demo::prepare_textures() {
-    vk::Format const tex_format = vk::Format::eR8G8B8A8Unorm;
+    vk::Format const tex_format = vk::Format::eR8G8B8A8Srgb;
     vk::FormatProperties props;
     gpu.getFormatProperties(tex_format, &props);
 
@@ -2302,7 +2799,7 @@ void Demo::prepare_textures() {
                              textures[i].imageLayout, vk::AccessFlagBits::eTransferWrite, vk::PipelineStageFlagBits::eTransfer,
                              vk::PipelineStageFlagBits::eFragmentShader);
         } else {
-            assert(!"No support for R8G8B8A8_UNORM as texture image format");
+            assert(false && "No support for R8G8B8A8_SRGB as texture image format");
         }
 
         auto const samplerInfo = vk::SamplerCreateInfo()
@@ -2338,7 +2835,11 @@ void Demo::prepare_textures() {
 
 vk::ShaderModule Demo::prepare_vs() {
     const uint32_t vertShaderCode[] = {
+#ifdef CUBE_VERT_INC
+#include CUBE_VERT_INC
+#else
 #include "cube.vert.inc"
+#endif
     };
 
     vert_shader_module = prepare_shader_module(vertShaderCode, sizeof(vertShaderCode));
@@ -2470,7 +2971,11 @@ void Demo::update_data_buffer() {
 }
 
 /* Convert ppm image data from header file into RGBA texture image */
+#ifdef TEXTURE_PPM_H
+#include TEXTURE_PPM_H
+#else
 #include "lunarg.ppm.h"
+#endif
 bool Demo::loadTexture(const char *filename, uint8_t *rgba_data, vk::SubresourceLayout &layout, uint32_t &width, uint32_t &height) {
     (void)filename;
     char *cPtr;
@@ -2607,7 +3112,8 @@ void Demo::create_window() {
     minsize.x = GetSystemMetrics(SM_CXMINTRACK);
     minsize.y = GetSystemMetrics(SM_CYMINTRACK) + 1;
 }
-#elif defined(VK_USE_PLATFORM_XLIB_KHR)
+#endif
+#if defined(VK_USE_PLATFORM_XLIB_KHR)
 
 void Demo::create_xlib_window() {
     const char *display_envar = getenv("DISPLAY");
@@ -2618,14 +3124,15 @@ void Demo::create_xlib_window() {
     }
 
     XInitThreads();
-    display = XOpenDisplay(nullptr);
+    xlib_display = XOpenDisplay(nullptr);
     long visualMask = VisualScreenMask;
     int numberOfVisuals;
     XVisualInfo vInfoTemplate = {};
-    vInfoTemplate.screen = DefaultScreen(display);
-    XVisualInfo *visualInfo = XGetVisualInfo(display, visualMask, &vInfoTemplate, &numberOfVisuals);
+    vInfoTemplate.screen = DefaultScreen(xlib_display);
+    XVisualInfo *visualInfo = XGetVisualInfo(xlib_display, visualMask, &vInfoTemplate, &numberOfVisuals);
 
-    Colormap colormap = XCreateColormap(display, RootWindow(display, vInfoTemplate.screen), visualInfo->visual, AllocNone);
+    Colormap colormap =
+        XCreateColormap(xlib_display, RootWindow(xlib_display, vInfoTemplate.screen), visualInfo->visual, AllocNone);
 
     XSetWindowAttributes windowAttributes = {};
     windowAttributes.colormap = colormap;
@@ -2634,13 +3141,13 @@ void Demo::create_xlib_window() {
     windowAttributes.event_mask = KeyPressMask | KeyReleaseMask | StructureNotifyMask | ExposureMask;
 
     xlib_window =
-        XCreateWindow(display, RootWindow(display, vInfoTemplate.screen), 0, 0, width, height, 0, visualInfo->depth, InputOutput,
-                      visualInfo->visual, CWBackPixel | CWBorderPixel | CWEventMask | CWColormap, &windowAttributes);
+        XCreateWindow(xlib_display, RootWindow(xlib_display, vInfoTemplate.screen), 0, 0, width, height, 0, visualInfo->depth,
+                      InputOutput, visualInfo->visual, CWBackPixel | CWBorderPixel | CWEventMask | CWColormap, &windowAttributes);
 
-    XSelectInput(display, xlib_window, ExposureMask | KeyPressMask);
-    XMapWindow(display, xlib_window);
-    XFlush(display);
-    xlib_wm_delete_window = XInternAtom(display, "WM_DELETE_WINDOW", False);
+    XSelectInput(xlib_display, xlib_window, ExposureMask | KeyPressMask);
+    XMapWindow(xlib_display, xlib_window);
+    XFlush(xlib_display);
+    xlib_wm_delete_window = XInternAtom(xlib_display, "WM_DELETE_WINDOW", False);
 }
 
 void Demo::handle_xlib_event(const XEvent *event) {
@@ -2683,11 +3190,11 @@ void Demo::run_xlib() {
         XEvent event;
 
         if (pause) {
-            XNextEvent(display, &event);
+            XNextEvent(xlib_display, &event);
             handle_xlib_event(&event);
         }
-        while (XPending(display) > 0) {
-            XNextEvent(display, &event);
+        while (XPending(xlib_display) > 0) {
+            XNextEvent(xlib_display, &event);
             handle_xlib_event(&event);
         }
 
@@ -2699,7 +3206,8 @@ void Demo::run_xlib() {
         }
     }
 }
-#elif defined(VK_USE_PLATFORM_XCB_KHR)
+#endif
+#if defined(VK_USE_PLATFORM_XCB_KHR)
 
 void Demo::handle_xcb_event(const xcb_generic_event_t *event) {
     uint8_t event_code = event->response_type & 0x7f;
@@ -2799,14 +3307,15 @@ void Demo::create_xcb_window() {
     std::array<uint32_t, 2> const coords = {100, 100};
     xcb_configure_window(connection, xcb_window, XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y, coords.data());
 }
-#elif defined(VK_USE_PLATFORM_WAYLAND_KHR)
+#endif
+#if defined(VK_USE_PLATFORM_WAYLAND_KHR)
 
-void Demo::run() {
+void Demo::run_wayland() {
     while (!quit) {
         if (pause) {
-            wl_display_dispatch(display);
+            wl_display_dispatch(wayland_display);
         } else {
-            wl_display_dispatch_pending(display);
+            wl_display_dispatch_pending(wayland_display);
             draw();
             curFrame++;
             if (frameCount != UINT32_MAX && curFrame == frameCount) {
@@ -2848,21 +3357,21 @@ static void handle_toplevel_close(void *data, xdg_toplevel *xdg_toplevel) {
 
 static const xdg_toplevel_listener toplevel_listener = {handle_toplevel_configure, handle_toplevel_close};
 
-void Demo::create_window() {
+void Demo::create_wayland_window() {
     if (!wm_base) {
         printf("Compositor did not provide the standard protocol xdg-wm-base\n");
         fflush(stdout);
         exit(1);
     }
 
-    window = wl_compositor_create_surface(compositor);
-    if (!window) {
+    wayland_window = wl_compositor_create_surface(compositor);
+    if (!wayland_window) {
         printf("Can not create wayland_surface from compositor!\n");
         fflush(stdout);
         exit(1);
     }
 
-    window_surface = xdg_wm_base_get_xdg_surface(wm_base, window);
+    window_surface = xdg_wm_base_get_xdg_surface(wm_base, wayland_window);
     if (!window_surface) {
         printf("Can not get xdg_surface from wayland_surface!\n");
         fflush(stdout);
@@ -2883,9 +3392,10 @@ void Demo::create_window() {
         zxdg_toplevel_decoration_v1_set_mode(toplevel_decoration, ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
     }
 
-    wl_surface_commit(window);
+    wl_surface_commit(wayland_window);
 }
-#elif defined(VK_USE_PLATFORM_DIRECTFB_EXT)
+#endif
+#if defined(VK_USE_PLATFORM_DIRECTFB_EXT)
 
 void Demo::handle_directfb_event(const DFBInputEvent *event) {
     if (event->type != DIET_KEYPRESS) return;
@@ -2948,7 +3458,7 @@ void Demo::create_directfb_window() {
     desc.caps = DSCAPS_PRIMARY;
     desc.width = width;
     desc.height = height;
-    ret = dfb->CreateSurface(dfb, &desc, &window);
+    ret = dfb->CreateSurface(dfb, &desc, &directfb_window);
     if (ret) {
         printf("CreateSurface failed to create DirectFB surface interface!\n");
         fflush(stdout);
@@ -2962,7 +3472,8 @@ void Demo::create_directfb_window() {
         exit(1);
     }
 }
-#elif defined(VK_USE_PLATFORM_METAL_EXT)
+#endif
+#if defined(VK_USE_PLATFORM_METAL_EXT)
 void Demo::run() {
     draw();
     curFrame++;
@@ -2970,7 +3481,8 @@ void Demo::run() {
         quit = true;
     }
 }
-#elif defined(VK_USE_PLATFORM_DISPLAY_KHR)
+#endif
+#if defined(VK_USE_PLATFORM_DISPLAY_KHR)
 
 vk::Result Demo::create_display_surface() {
     auto display_properties_return = gpu.getDisplayPropertiesKHR();
@@ -3078,7 +3590,8 @@ void Demo::run_display() {
     }
 }
 
-#elif defined(VK_USE_PLATFORM_SCREEN_QNX)
+#endif
+#if defined(VK_USE_PLATFORM_SCREEN_QNX)
 #include <sys/keycodes.h>
 
 void Demo::run() {
@@ -3242,6 +3755,115 @@ void Demo::create_window() {
     }
 }
 #endif
+#if defined(VK_USE_PLATFORM_FUCHSIA)
+
+const char *Demo::get_fuchsia_image_pipe_layer() const {
+    switch (wsi_platform) {
+        case (WsiPlatform::fuchsia_display):
+            return "VK_LAYER_FUCHSIA_imagepipe_swapchain_fb";
+        case (WsiPlatform::fuchsia_scenic):
+            return "VK_LAYER_FUCHSIA_imagepipe_swapchain";
+        case (WsiPlatform::auto_):
+            ERR_EXIT("auto WSI platform is not supported on Fuchsia", "get_fuchsia_image_pipe_layer failure");
+        default:
+            ERR_EXIT("Invalid WSI platform", "get_fuchsia_image_pipe_layer failure");
+    }
+}
+
+void Demo::create_flatland_view() {
+    if (flatland_view) return;
+
+    zx::result<fidl::ClientEnd<fuchsia_io::Directory> > incoming_result = component::OpenServiceRoot();
+    if (incoming_result.is_error()) {
+        printf("Failed to open incoming directory: %s\n", incoming_result.status_string());
+        ERR_EXIT("Failed to open incoming directory", "create_flatland_view failure");
+    }
+    incoming = std::move(incoming_result).value();
+
+    outgoing = std::make_unique<component::OutgoingDirectory>(loop.dispatcher());
+
+    FlatlandViewProviderService::CreateView2Callback create_view_callback = [this](fuchsia_ui_app::CreateView2Args args) {
+        auto resize_callback = [this](uint32_t width, uint32_t height) {
+            this->width = width;
+            this->height = height;
+            if (prepared) {
+                resize();
+            }
+        };
+
+        flatland_view =
+            FlatlandView::Create(incoming.borrow(), std::move(*args.view_creation_token()), resize_callback, loop.dispatcher());
+        if (!flatland_view) ERR_EXIT("Failed to created FlatlandView", "create_flatland_view failure");
+
+        view_creation_token = flatland_view->TakeChildViewCreationToken();
+    };
+
+    view_provider_service = std::make_unique<FlatlandViewProviderService>(std::move(create_view_callback), loop.dispatcher());
+
+    zx::result<> add_protocol_result = outgoing->AddUnmanagedProtocol<fuchsia_ui_app::ViewProvider>(
+        [view_provider_service = view_provider_service.get()](fidl::ServerEnd<fuchsia_ui_app::ViewProvider> server_end) {
+            view_provider_service->HandleViewProviderRequest(std::move(server_end));
+        });
+    if (add_protocol_result.is_error()) {
+        printf("Failed to add protocol to outgoing directory: %s\n", add_protocol_result.status_string());
+        ERR_EXIT("Failed to add protocol to outgoing directory", "create_flatland_view failure");
+    }
+
+    zx::result<> serve_result = outgoing->ServeFromStartupInfo();
+    if (serve_result.is_error()) {
+        printf("Failed to serve outgoing directory: %s\n", serve_result.status_string());
+        ERR_EXIT("Failed to serve outgoing directory", "create_flatland_view failure");
+    }
+
+    zx_status_t loop_status = ZX_OK;
+
+    // Run message loop until view has been created.
+    while (!quit && !flatland_view && loop_status == ZX_OK) {
+        loop_status = loop.RunUntilIdle();
+    }
+}
+
+void Demo::run() {
+    uint32_t num_frames = 60;
+    uint32_t elapsed_frames = 0;
+    static const float kMsPerSec = 1000;
+
+    double total_ms = 0;
+    auto t0 = std::chrono::high_resolution_clock::now();
+
+    while (!quit) {
+        if (wsi_platform == WsiPlatform::fuchsia_scenic) {
+            if (loop.RunUntilIdle() != ZX_OK) {
+                break;
+            }
+        }
+        auto t1 = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double, std::milli> elapsed = t1 - t0;
+        total_ms += elapsed.count();
+        t0 = t1;
+
+        if (elapsed_frames && (elapsed_frames % num_frames) == 0) {
+            float fps = static_cast<float>(num_frames / (total_ms / kMsPerSec));
+            printf("Framerate average for last %u frames: %f frames per second\n", num_frames, fps);
+            fflush(stdout);
+            total_ms = 0;
+            // attempt to log once per second
+            num_frames = static_cast<uint32_t>(fps);
+            elapsed_frames = 0;
+        }
+
+        draw();
+
+        curFrame++;
+        elapsed_frames++;
+
+        if (frameCount != UINT32_MAX && curFrame == frameCount) {
+            quit = true;
+        }
+    }
+}
+
+#endif
 
 #if _WIN32
 // Include header required for parsing the command line options.
@@ -3353,6 +3975,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR pCmdLine,
     demo.connection = hInstance;
     demo.name = "Vulkan Cube";
     demo.create_window();
+    demo.create_surface();
+    demo.select_physical_device();
     demo.init_vk_swapchain();
 
     demo.prepare();
@@ -3387,42 +4011,115 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR pCmdLine,
     return static_cast<int>(msg.wParam);
 }
 
-#elif defined(__linux__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__QNX__) || defined(__GNU__)
+#elif defined(__linux__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__QNX__) || defined(__GNU__) || \
+    defined(__Fuchsia__)
 
 int main(int argc, char **argv) {
     Demo demo;
 
     demo.init(argc, argv);
 
+    switch (demo.wsi_platform) {
+        default:
+        case (WsiPlatform::auto_):
+            fprintf(stderr,
+                    "WSI platform should have already been set, indicating a bug. Please set a WSI platform manually with "
+                    "--wsi\n");
+            exit(1);
+            break;
 #if defined(VK_USE_PLATFORM_XCB_KHR)
-    demo.create_xcb_window();
-#elif defined(VK_USE_PLATFORM_XLIB_KHR)
-    demo.create_xlib_window();
-#elif defined(VK_USE_PLATFORM_WAYLAND_KHR)
-    demo.create_window();
-#elif defined(VK_USE_PLATFORM_DIRECTFB_EXT)
-    demo.create_directfb_window();
-#elif defined(VK_USE_PLATFORM_SCREEN_QNX)
-    demo.create_window();
+        case (WsiPlatform::xcb):
+            demo.create_xcb_window();
+            break;
 #endif
+#if defined(VK_USE_PLATFORM_XLIB_KHR)
+        case (WsiPlatform::xlib):
+            demo.create_xlib_window();
+            break;
+#endif
+#if defined(VK_USE_PLATFORM_WAYLAND_KHR)
+        case (WsiPlatform::wayland):
+            demo.create_wayland_window();
+            break;
+#endif
+#if defined(VK_USE_PLATFORM_DIRECTFB_EXT)
+        case (WsiPlatform::directfb):
+            demo.create_directfb_window();
+            break;
+#endif
+#if defined(VK_USE_PLATFORM_SCREEN_QNX)
+        case (WsiPlatform::qnx):
+            demo.create_window();
+            break;
+#endif
+#if defined(VK_USE_PLATFORM_DISPLAY_KHR)
+        case (WsiPlatform::display):
+            // nothing to do here
+            break;
+#endif
+#if defined(VK_USE_PLATFORM_FUCHSIA)
+        case (WsiPlatform::fuchsia_display):
+            // nothing to do here
+            break;
+        case (WsiPlatform::fuchsia_scenic):
+            demo.create_flatland_view();
+            break;
+#endif
+    }
+
+    demo.create_surface();
+
+    demo.select_physical_device();
 
     demo.init_vk_swapchain();
 
     demo.prepare();
 
+    switch (demo.wsi_platform) {
+        default:
+        case (WsiPlatform::auto_):
+            fprintf(stderr,
+                    "WSI platform should have already been set, indicating a bug. Please set a WSI platform manually with "
+                    "--wsi\n");
+            exit(1);
+            break;
 #if defined(VK_USE_PLATFORM_XCB_KHR)
-    demo.run_xcb();
-#elif defined(VK_USE_PLATFORM_XLIB_KHR)
-    demo.run_xlib();
-#elif defined(VK_USE_PLATFORM_WAYLAND_KHR)
-    demo.run();
-#elif defined(VK_USE_PLATFORM_DIRECTFB_EXT)
-    demo.run_directfb();
-#elif defined(VK_USE_PLATFORM_DISPLAY_KHR)
-    demo.run_display();
-#elif defined(VK_USE_PLATFORM_SCREEN_QNX)
-    demo.run();
+        case (WsiPlatform::xcb):
+            demo.run_xcb();
+            break;
 #endif
+#if defined(VK_USE_PLATFORM_XLIB_KHR)
+        case (WsiPlatform::xlib):
+            demo.run_xlib();
+            break;
+#endif
+#if defined(VK_USE_PLATFORM_WAYLAND_KHR)
+        case (WsiPlatform::wayland):
+            demo.run_wayland();
+            break;
+#endif
+#if defined(VK_USE_PLATFORM_DIRECTFB_EXT)
+        case (WsiPlatform::directfb):
+            demo.run_directfb();
+            break;
+#endif
+#if defined(VK_USE_PLATFORM_DISPLAY_KHR)
+        case (WsiPlatform::display):
+            demo.run_display();
+            break;
+#endif
+#if defined(VK_USE_PLATFORM_SCREEN_QNX)
+        case (WsiPlatform::qnx):
+            demo.run();
+            break;
+#endif
+#if defined(VK_USE_PLATFORM_FUCHSIA)
+        case (WsiPlatform::fuchsia_display):
+        case (WsiPlatform::fuchsia_scenic):
+            demo.run();
+            break;
+#endif
+    }
 
     demo.cleanup();
 
@@ -3435,6 +4132,8 @@ int main(int argc, char **argv) {
 static void demo_main(Demo &demo, void *caMetalLayer, int argc, const char *argv[]) {
     demo.init(argc, (char **)argv);
     demo.caMetalLayer = caMetalLayer;
+    demo.create_surface();
+    demo.select_physical_device();
     demo.init_vk_swapchain();
     demo.prepare();
     demo.spin_angle = 0.4f;

@@ -2501,7 +2501,7 @@ static void demo_prepare_descriptor_heap(struct demo *demo)
                 const VkHostAddressStridedRangeKHR bufferRagge = {
                     .size = demo->descriptorHeapProperties.bufferDescriptorSize,
                     .stride = demo->descriptorHeapProperties.bufferHeapDescriptorAlignment,
-                    .pData = (pData + ii * demo->descriptorHeapProperties.bufferHeapDescriptorAlignment),
+                    .pData = ((char*)pData + ii * demo->descriptorHeapProperties.bufferHeapDescriptorAlignment),
                 };
 
                 VkBufferDeviceAddressInfo addressInfo = {

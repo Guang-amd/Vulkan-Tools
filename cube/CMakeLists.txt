@@ -380,6 +380,15 @@ if(CMAKE_SYSTEM_NAME MATCHES "Linux|BSD|GNU")
         target_link_libraries(vkcube-heap PRIVATE rt)
     endif()
     target_link_libraries(vkcube-heap PRIVATE Vulkan::Headers volk::volk_headers Threads::Threads)
+else()
+    add_executable(vkcube-heap
+                   WIN32
+                   cube-heap.c
+                   ${PROJECT_SOURCE_DIR}/cube/cube.vert
+                   ${PROJECT_SOURCE_DIR}/cube/cube.frag
+                   cube.vert.inc
+                   cube.frag.inc)
+    target_link_libraries(vkcube-heap Vulkan::Headers volk::volk_headers)
 endif()
 
 target_include_directories(vkcube-heap PRIVATE .)
